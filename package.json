@@ -1,0 +1,26 @@
+{
+  "name": "arcsync-action",
+  "version": "2.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "biome lint src/",
+    "format": "biome format --write src/",
+    "check": "biome check src/"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.0",
+    "@actions/github": "^6.0.0"
+  },
+  "devDependencies": {
+    "vite": "^8.0.14"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VanLandinghamLabs/arcsync-action.git"
+  },
+  "license": "MIT"
+}

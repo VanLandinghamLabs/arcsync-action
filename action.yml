@@ -1,0 +1,38 @@
+name: "ArcSync"
+description: "Generate architecture diagrams from your IaC build output"
+author: "VanLandinghamLabs"
+branding:
+  icon: "share-2"
+  color: "purple"
+inputs:
+  path:
+    description: "Path to a cdk synth output directory, or a terraform show -json file"
+    required: false
+    default: "cdk.out"
+  api-url:
+    description: "ArcSync API endpoint"
+    required: false
+    default: "https://api.arcsync.dev"
+  api-client-id:
+    description: "ArcSync API client ID (provided when you register a CI integration)"
+    required: true
+  api-client-secret:
+    description: "ArcSync API client secret"
+    required: true
+  comment:
+    description: "Post/update a PR comment with the diagram (pull_request events only)"
+    required: false
+    default: "true"
+  output:
+    description: "Optional local file path to write the returned Mermaid markdown"
+    required: false
+outputs:
+  mermaid:
+    description: "Mermaid markdown returned by the API"
+  graph-id:
+    description: "ArcSync graph ID"
+  graph-url:
+    description: "URL to the interactive diagram on arcsync.dev"
+runs:
+  using: "node24"
+  main: "dist/index.js"
