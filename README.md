@@ -11,6 +11,23 @@ only the synthesized infrastructure description.
 > This repository is a one-way mirror of the ArcSync monorepo. See **Contributing**
 > below.
 
+## Setup
+
+1. Sign in at [arcsync.dev](https://arcsync.dev) and open **Settings → GitHub Action credentials**.
+2. Enter a label (e.g. your repo name) and click **Create credential**.
+3. Copy the **Client ID** and **Client Secret** shown once, and add them to your
+   repo under **Settings → Secrets and variables → Actions** as
+   `ARCSYNC_CLIENT_ID` and `ARCSYNC_CLIENT_SECRET`.
+4. Reference them in your workflow:
+
+```yaml
+- uses: VanLandinghamLabs/arcsync-action@v2
+  with:
+    api-client-id: ${{ secrets.ARCSYNC_CLIENT_ID }}
+    api-client-secret: ${{ secrets.ARCSYNC_CLIENT_SECRET }}
+    path: cdk.out   # or a `terraform show -json` file
+```
+
 ## Usage
 
 ### AWS CDK

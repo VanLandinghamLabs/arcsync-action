@@ -14,10 +14,10 @@ inputs:
     required: false
     default: "https://api.arcsync.dev"
   api-client-id:
-    description: "ArcSync API client ID (provided when you register a CI integration)"
+    description: "ArcSync client ID — create one at arcsync.dev → Settings → GitHub Action credentials"
     required: true
   api-client-secret:
-    description: "ArcSync API client secret"
+    description: "ArcSync client secret (shown once when you create the credential)"
     required: true
   comment:
     description: "Post/update a PR comment with the diagram (pull_request events only)"

@@ -19,6 +19,7 @@ vi.mock("@actions/core", () => ({
 const mockCreateComment = vi.fn().mockResolvedValue({ data: { id: 1 } });
 const mockUpdateComment = vi.fn().mockResolvedValue({ data: { id: 1 } });
 const mockListComments = vi.fn().mockResolvedValue({ data: [] });
+const mockReposGet = vi.fn().mockResolvedValue({ data: { description: "default-repo" } });
 
 const mockGithubContext = {
   payload: {} as Record<string, unknown>,
@@ -33,6 +34,9 @@ vi.mock("@actions/github", () => ({
         createComment: (...args: unknown[]) => mockCreateComment(...args),
         updateComment: (...args: unknown[]) => mockUpdateComment(...args),
         listComments: (...args: unknown[]) => mockListComments(...args),
+      },
+      repos: {
+        get: (...args: unknown[]) => mockReposGet(...args),
       },
     },
   }),
@@ -98,6 +102,7 @@ describe("GitHub Action — thin uploader", () => {
     mockStatSync.mockReturnValue({ isDirectory: () => true });
     mockReaddirSync.mockReturnValue(["App.template.json"]);
     mockReadFileSync.mockReturnValue('{"Resources":{}}');
+    mockReposGet.mockResolvedValue({ data: { description: "default-repo" } });
     // biome-ignore lint/performance/noDelete: process.env.X = undefined sets the string "undefined"
     delete process.env.GITHUB_TOKEN;
     // biome-ignore lint/performance/noDelete: same reason
@@ -106,6 +111,8 @@ describe("GitHub Action — thin uploader", () => {
     delete process.env.GITHUB_REF_NAME;
     // biome-ignore lint/performance/noDelete: same reason
     delete process.env.GITHUB_SHA;
+    // biome-ignore lint/performance/noDelete: same reason
+    delete process.env._ARCSYNC_REPO_META_TIMEOUT_MS;
   });
 
   describe("Input validation", () => {
@@ -241,6 +248,43 @@ describe("GitHub Action — thin uploader", () => {
       expect(mockExistsSync).toHaveBeenCalledWith("cdk.out");
       expect(mockReaddirSync).toHaveBeenCalledWith("cdk.out");
       expect(mockInfo).toHaveBeenCalledWith(expect.stringContaining("from cdk.out"));
+    });
+
+    it("includes repoData from repos.get in the ingest POST body", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockReposGet.mockResolvedValueOnce({ data: { description: "private" } });
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.repoData).toBeDefined();
+      expect(ingestBody.repoData.description).toBe("private");
+    });
+
+    it("omits repoData when repos.get throws (best-effort)", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockReposGet.mockRejectedValueOnce(new Error("403 Forbidden"));
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.repoData).toBeUndefined();
+    });
+
+    it("omits repoData when repos.get never resolves (timeout fires)", async () => {
+      // Tiny timeout so the race resolves in ~50 ms without waiting 3 s.
+      process.env._ARCSYNC_REPO_META_TIMEOUT_MS = "50";
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      process.env.GITHUB_TOKEN = "gh-token";
+      // repos.get returns a promise that never settles — simulates a hung API call.
+      mockReposGet.mockReturnValueOnce(new Promise(() => {}));
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.repoData).toBeUndefined();
     });
   });
 

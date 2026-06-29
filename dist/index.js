@@ -19610,12 +19610,39 @@ async function fetchAccessToken(apiUrl, clientId, clientSecret) {
 		return null;
 	}
 }
+/** Mirrors the backend fetchRepoMetadata 2.5 s cap; overridable via env for tests. */
+var REPO_META_TIMEOUT_MS = 3e3;
 async function uploadToArcSync(apiUrl, token, artifacts) {
+	const timeoutMs = process.env._ARCSYNC_REPO_META_TIMEOUT_MS ? Number(process.env._ARCSYNC_REPO_META_TIMEOUT_MS) : REPO_META_TIMEOUT_MS;
+	let repoData;
+	try {
+		const ghToken = process.env.GITHUB_TOKEN;
+		if (ghToken) {
+			const metaOctokit = import_github.getOctokit(ghToken);
+			const { owner, repo } = import_github.context.repo;
+			let timeoutHandle;
+			const timeoutRace = new Promise((resolve) => {
+				timeoutHandle = setTimeout(() => resolve(null), timeoutMs);
+			});
+			const fetchPromise = metaOctokit.rest.repos.get({
+				owner,
+				repo
+			});
+			fetchPromise.catch(() => {});
+			try {
+				const result = await Promise.race([fetchPromise, timeoutRace]);
+				if (result !== null) repoData = result.data;
+			} finally {
+				clearTimeout(timeoutHandle);
+			}
+		}
+	} catch {}
 	const body = JSON.stringify({
 		repoUrl: process.env.GITHUB_REPOSITORY ? `https://github.com/${process.env.GITHUB_REPOSITORY}` : "unknown",
 		branch: process.env.GITHUB_REF_NAME ?? "main",
 		commitSha: process.env.GITHUB_SHA,
-		artifacts
+		artifacts,
+		...repoData ? { repoData } : {}
 	});
 	try {
 		const response = await fetch(`${apiUrl}/graphs/ingest`, {
