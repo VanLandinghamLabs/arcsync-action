@@ -28,6 +28,22 @@ only the synthesized infrastructure description.
     path: cdk.out   # or a `terraform show -json` file
 ```
 
+### Repository permissions
+
+The action reads your repo's metadata — visibility, description, topics — with
+the workflow's own token, which `github-token` defaults to. Most workflows need
+no change. If your workflow narrows `permissions`, keep at least:
+
+```yaml
+permissions:
+  contents: read        # repo metadata
+  pull-requests: write  # only if you leave `comment: true`
+```
+
+Without a usable token the backend cannot tell a public repo from a private
+one. It assumes private and keeps the diagram out of the public gallery, which
+is not reversible after the fact — so grant the read rather than fixing it later.
+
 ## Usage
 
 ### AWS CDK

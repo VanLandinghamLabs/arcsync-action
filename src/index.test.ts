@@ -262,6 +262,27 @@ describe("GitHub Action — thin uploader", () => {
       expect(ingestBody.repoData.description).toBe("private");
     });
 
+    // The gap that shipped #678's regression: every existing repoData test set
+    // process.env.GITHUB_TOKEN by hand, but GitHub does not inject it into an
+    // action's environment and action.yml declared no input for it — so under
+    // the documented workflow repoData was ALWAYS absent, and the backend's
+    // fail-closed default would have marked every canon private and emptied
+    // the gallery. This pins the contract with no env var in sight.
+    it("sends repoData using the github-token input alone, with no GITHUB_TOKEN env", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out", "github-token": "from-input" });
+      // Explicitly absent — action.yml's `default: ${{ github.token }}` is what
+      // supplies this in a real run.
+      expect(process.env.GITHUB_TOKEN).toBeUndefined();
+      mockReposGet.mockResolvedValueOnce({ data: { private: false, description: "d" } });
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.repoData).toBeDefined();
+      // The field the backend's visibility decision turns on.
+      expect(ingestBody.repoData.private).toBe(false);
+    });
+
     it("omits repoData when repos.get throws (best-effort)", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
       process.env.GITHUB_TOKEN = "gh-token";

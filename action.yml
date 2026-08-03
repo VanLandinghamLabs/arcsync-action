@@ -19,6 +19,15 @@ inputs:
   api-client-secret:
     description: "ArcSync client secret (shown once when you create the credential)"
     required: true
+  github-token:
+    description: >-
+      Token used to read this repo's metadata (visibility, description, topics)
+      and to post the PR comment. Defaults to the workflow's own token, which
+      needs no configuration. GITHUB_TOKEN is NOT auto-injected into an
+      action's environment, so without this the backend cannot tell a private
+      repo from a public one and keeps the diagram out of the gallery.
+    required: false
+    default: ${{ github.token }}
   comment:
     description: "Post/update a PR comment with the diagram (pull_request events only)"
     required: false

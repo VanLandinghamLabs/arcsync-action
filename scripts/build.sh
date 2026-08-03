@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Build the GitHub Action as an ESM bundle using Vite/Rollup.
-# All dependencies (@actions/core, @actions/github, @auto-arch-diagram/core)
-# are inlined. Only Node builtins are externalized.
+# All dependencies (@actions/core, @actions/github) are inlined.
+# Only Node builtins are externalized.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PKG_DIR="$(dirname "$SCRIPT_DIR")"

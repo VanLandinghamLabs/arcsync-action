@@ -131,13 +131,19 @@ async function uploadToArcSync(
   token: string,
   artifacts: IngestArtifact[],
 ): Promise<IngestResponse | null> {
-  const timeoutMs = process.env._ARCSYNC_REPO_META_TIMEOUT_MS
-    ? Number(process.env._ARCSYNC_REPO_META_TIMEOUT_MS)
-    : REPO_META_TIMEOUT_MS;
+  // `Number(...) || DEFAULT` guards both a malformed env (Number("abc") → NaN,
+  // and setTimeout(NaN) fires immediately) and an accidental 0 — either falls
+  // back to the safe default rather than collapsing the timeout to zero.
+  const timeoutMs = Number(process.env._ARCSYNC_REPO_META_TIMEOUT_MS) || REPO_META_TIMEOUT_MS;
 
   let repoData: unknown;
   try {
-    const ghToken = process.env.GITHUB_TOKEN;
+    // `github-token` defaults to ${{ github.token }} in action.yml, so this is
+    // populated without the workflow doing anything. The env fallback keeps
+    // working for anyone who wired GITHUB_TOKEN by hand before that input
+    // existed. Without a token the backend gets no `repoData` and must assume
+    // private (#678), which keeps the diagram out of the gallery.
+    const ghToken = core.getInput("github-token") || process.env.GITHUB_TOKEN;
     if (ghToken) {
       const metaOctokit = github.getOctokit(ghToken);
       const { owner, repo } = github.context.repo;

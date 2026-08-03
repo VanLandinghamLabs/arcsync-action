@@ -9,7 +9,14 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __esmMin = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+var __esmMin = (fn, res, err) => () => {
+	if (err) throw err[0];
+	try {
+		return fn && (res = fn(fn = 0)), res;
+	} catch (e) {
+		throw err = [e], e;
+	}
+};
 var __commonJSMin = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);
 var __exportAll = (all, no_symbols) => {
 	let target = {};
@@ -1645,7 +1652,7 @@ var require_Dicer = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 //#region ../../node_modules/.pnpm/@fastify+busboy@2.1.1/node_modules/@fastify/busboy/lib/utils/decodeText.js
 var require_decodeText = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	var utf8Decoder = new TextDecoder("utf-8");
-	var textDecoders = new Map([["utf-8", utf8Decoder], ["utf8", utf8Decoder]]);
+	var textDecoders = /* @__PURE__ */ new Map([["utf-8", utf8Decoder], ["utf8", utf8Decoder]]);
 	function getDecoder(charset) {
 		let lc;
 		while (true) switch (charset) {
@@ -4841,7 +4848,7 @@ Content-Type: ${value.type || "application/octet-stream"}\r\n\r\n`);
 			}
 		};
 		if (object[kState].body == null) {
-			successSteps(new Uint8Array());
+			successSteps(/* @__PURE__ */ new Uint8Array());
 			return promise.promise;
 		}
 		await fullyReadBody(object[kState].body, successSteps, errorSteps);
@@ -19613,10 +19620,10 @@ async function fetchAccessToken(apiUrl, clientId, clientSecret) {
 /** Mirrors the backend fetchRepoMetadata 2.5 s cap; overridable via env for tests. */
 var REPO_META_TIMEOUT_MS = 3e3;
 async function uploadToArcSync(apiUrl, token, artifacts) {
-	const timeoutMs = process.env._ARCSYNC_REPO_META_TIMEOUT_MS ? Number(process.env._ARCSYNC_REPO_META_TIMEOUT_MS) : REPO_META_TIMEOUT_MS;
+	const timeoutMs = Number(process.env._ARCSYNC_REPO_META_TIMEOUT_MS) || REPO_META_TIMEOUT_MS;
 	let repoData;
 	try {
-		const ghToken = process.env.GITHUB_TOKEN;
+		const ghToken = import_core.getInput("github-token") || process.env.GITHUB_TOKEN;
 		if (ghToken) {
 			const metaOctokit = import_github.getOctokit(ghToken);
 			const { owner, repo } = import_github.context.repo;
