@@ -1,6 +1,11 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import * as core from "@actions/core";
+
+/** Must stay identical to the backend's ARCSYNC_OIDC_AUDIENCE — a token minted
+ * for a different audience is rejected there, by design. */
+const ARCSYNC_OIDC_AUDIENCE = "https://api.arcsync.dev";
+
 import * as github from "@actions/github";
 
 const COMMENT_MARKER = "<!-- arcsync-diagram -->";
@@ -166,6 +171,22 @@ async function uploadToArcSync(
     /* best-effort: omit repoData, backend falls back to unauth */
   }
 
+  // GitHub signs the `repository` claim in this token for the workflow that is
+  // actually running, so it is the only part of the request the backend can
+  // trust to say which repo we are. Requires `permissions: id-token: write` in
+  // the workflow; getIDToken throws without it, and the backend then treats the
+  // ingest as unverified rather than failing it — so an un-migrated workflow
+  // keeps working, it just does not get the binding.
+  let oidcToken: string | undefined;
+  try {
+    oidcToken = await core.getIDToken(ARCSYNC_OIDC_AUDIENCE);
+  } catch {
+    core.info(
+      "No OIDC token available — add `permissions: id-token: write` to bind this " +
+        "upload to your repository. Continuing unverified.",
+    );
+  }
+
   const body = JSON.stringify({
     repoUrl: process.env.GITHUB_REPOSITORY
       ? `https://github.com/${process.env.GITHUB_REPOSITORY}`
@@ -174,6 +195,7 @@ async function uploadToArcSync(
     commitSha: process.env.GITHUB_SHA,
     artifacts,
     ...(repoData ? { repoData } : {}),
+    ...(oidcToken ? { oidcToken } : {}),
   });
 
   try {

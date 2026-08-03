@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockGetInput = vi.fn();
+const mockGetIDToken = vi.fn();
 const mockSetOutput = vi.fn();
 const mockSetFailed = vi.fn();
 const mockInfo = vi.fn();
@@ -9,6 +10,7 @@ const mockSetSecret = vi.fn();
 
 vi.mock("@actions/core", () => ({
   getInput: (...args: unknown[]) => mockGetInput(...args),
+  getIDToken: (...args: unknown[]) => mockGetIDToken(...args),
   setOutput: (...args: unknown[]) => mockSetOutput(...args),
   setFailed: (...args: unknown[]) => mockSetFailed(...args),
   info: (...args: unknown[]) => mockInfo(...args),
@@ -105,6 +107,7 @@ describe("GitHub Action — thin uploader", () => {
     mockReposGet.mockResolvedValue({ data: { description: "default-repo" } });
     // biome-ignore lint/performance/noDelete: process.env.X = undefined sets the string "undefined"
     delete process.env.GITHUB_TOKEN;
+    mockGetIDToken.mockReset().mockRejectedValue(new Error("no id-token permission"));
     // biome-ignore lint/performance/noDelete: same reason
     delete process.env.GITHUB_REPOSITORY;
     // biome-ignore lint/performance/noDelete: same reason
@@ -281,6 +284,35 @@ describe("GitHub Action — thin uploader", () => {
       expect(ingestBody.repoData).toBeDefined();
       // The field the backend's visibility decision turns on.
       expect(ingestBody.repoData.private).toBe(false);
+    });
+
+    // #679. The `repository` claim GitHub signs into this token is the only
+    // part of the ingest body a caller cannot choose, so it is what makes the
+    // backend's repoKey binding possible.
+    it("sends an OIDC token minted for the ArcSync audience", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGetIDToken.mockResolvedValueOnce("oidc.jwt.value");
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      // Audience must match the backend's ARCSYNC_OIDC_AUDIENCE exactly — a
+      // token minted for anything else is rejected there.
+      expect(mockGetIDToken).toHaveBeenCalledWith("https://api.arcsync.dev");
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.oidcToken).toBe("oidc.jwt.value");
+    });
+
+    // Un-migrated workflows have no `id-token: write`, so getIDToken throws.
+    // The upload must still succeed — unverified, not failed.
+    it("continues without an OIDC token when the permission is missing", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGetIDToken.mockRejectedValueOnce(new Error("Unable to get ACTIONS_ID_TOKEN_REQUEST_URL"));
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.oidcToken).toBeUndefined();
+      expect(mockInfo).toHaveBeenCalledWith(expect.stringContaining("id-token: write"));
     });
 
     it("omits repoData when repos.get throws (best-effort)", async () => {

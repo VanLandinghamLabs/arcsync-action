@@ -19528,6 +19528,9 @@ var require_github = /* @__PURE__ */ __commonJSMin(((exports) => {
 //#region src/index.ts
 var import_core = /* @__PURE__ */ __toESM(require_core(), 1);
 var import_github = /* @__PURE__ */ __toESM(require_github(), 1);
+/** Must stay identical to the backend's ARCSYNC_OIDC_AUDIENCE — a token minted
+* for a different audience is rejected there, by design. */
+var ARCSYNC_OIDC_AUDIENCE = "https://api.arcsync.dev";
 var COMMENT_MARKER = "<!-- arcsync-diagram -->";
 async function run() {
 	try {
@@ -19644,12 +19647,19 @@ async function uploadToArcSync(apiUrl, token, artifacts) {
 			}
 		}
 	} catch {}
+	let oidcToken;
+	try {
+		oidcToken = await import_core.getIDToken(ARCSYNC_OIDC_AUDIENCE);
+	} catch {
+		import_core.info("No OIDC token available — add `permissions: id-token: write` to bind this upload to your repository. Continuing unverified.");
+	}
 	const body = JSON.stringify({
 		repoUrl: process.env.GITHUB_REPOSITORY ? `https://github.com/${process.env.GITHUB_REPOSITORY}` : "unknown",
 		branch: process.env.GITHUB_REF_NAME ?? "main",
 		commitSha: process.env.GITHUB_SHA,
 		artifacts,
-		...repoData ? { repoData } : {}
+		...repoData ? { repoData } : {},
+		...oidcToken ? { oidcToken } : {}
 	});
 	try {
 		const response = await fetch(`${apiUrl}/graphs/ingest`, {

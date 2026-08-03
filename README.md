@@ -37,8 +37,23 @@ no change. If your workflow narrows `permissions`, keep at least:
 ```yaml
 permissions:
   contents: read        # repo metadata
+  id-token: write       # proves which repo this upload is for
   pull-requests: write  # only if you leave `comment: true`
 ```
+
+`id-token: write` lets the action request a short-lived OIDC token from GitHub.
+Its `repository` claim is signed by GitHub for the workflow that is actually
+running, and it is the only part of the upload the backend can trust to say
+which repo you are — everything else in the request is self-asserted.
+
+With it, your uploads are bound to your repository: a request carrying a token
+for a different repo is refused, and your CI no longer needs the repo in
+anyone's ArcSync library to be allowed to write.
+
+Without it the upload still succeeds, just unverified. That fallback exists so
+existing workflows keep working while adoption catches up, and it will be
+removed — until then it is what a request that simply omits the token relies
+on, so granting the permission is what makes the binding meaningful.
 
 Without a usable token the backend cannot tell a public repo from a private
 one. It assumes private and keeps the diagram out of the public gallery, which
