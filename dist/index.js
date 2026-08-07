@@ -19651,7 +19651,8 @@ async function uploadToArcSync(apiUrl, token, artifacts) {
 	try {
 		oidcToken = await import_core.getIDToken(ARCSYNC_OIDC_AUDIENCE);
 	} catch {
-		import_core.info("No OIDC token available — add `permissions: id-token: write` to bind this upload to your repository. Continuing unverified.");
+		import_core.setFailed("Could not mint a GitHub OIDC token. Add `permissions: id-token: write` to the job running arcsync-action — ArcSync uses it to prove which repository this upload belongs to.");
+		return null;
 	}
 	const body = JSON.stringify({
 		repoUrl: process.env.GITHUB_REPOSITORY ? `https://github.com/${process.env.GITHUB_REPOSITORY}` : "unknown",
@@ -19659,7 +19660,7 @@ async function uploadToArcSync(apiUrl, token, artifacts) {
 		commitSha: process.env.GITHUB_SHA,
 		artifacts,
 		...repoData ? { repoData } : {},
-		...oidcToken ? { oidcToken } : {}
+		oidcToken
 	});
 	try {
 		const response = await fetch(`${apiUrl}/graphs/ingest`, {

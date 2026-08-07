@@ -18,26 +18,37 @@ only the synthesized infrastructure description.
 3. Copy the **Client ID** and **Client Secret** shown once, and add them to your
    repo under **Settings → Secrets and variables → Actions** as
    `ARCSYNC_CLIENT_ID` and `ARCSYNC_CLIENT_SECRET`.
-4. Reference them in your workflow:
+4. Reference them in your workflow. `id-token: write` is required — see
+   [Repository permissions](#repository-permissions):
 
 ```yaml
-- uses: VanLandinghamLabs/arcsync-action@v2
-  with:
-    api-client-id: ${{ secrets.ARCSYNC_CLIENT_ID }}
-    api-client-secret: ${{ secrets.ARCSYNC_CLIENT_SECRET }}
-    path: cdk.out   # or a `terraform show -json` file
+jobs:
+  diagram:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      # ...your usual build steps, so that `path` below exists —
+      # e.g. `npx cdk synth` to produce cdk.out.
+      - uses: VanLandinghamLabs/arcsync-action@v2
+        with:
+          api-client-id: ${{ secrets.ARCSYNC_CLIENT_ID }}
+          api-client-secret: ${{ secrets.ARCSYNC_CLIENT_SECRET }}
+          path: cdk.out   # or a `terraform show -json` file
 ```
 
 ### Repository permissions
 
-The action reads your repo's metadata — visibility, description, topics — with
-the workflow's own token, which `github-token` defaults to. Most workflows need
-no change. If your workflow narrows `permissions`, keep at least:
+`id-token: write` is **required**. The action reads your repo's metadata —
+visibility, description, topics — with the workflow's own token, which
+`github-token` defaults to. Set at least:
 
 ```yaml
 permissions:
   contents: read        # repo metadata
-  id-token: write       # proves which repo this upload is for
+  id-token: write       # REQUIRED — proves which repo this upload is for
   pull-requests: write  # only if you leave `comment: true`
 ```
 
@@ -50,10 +61,11 @@ With it, your uploads are bound to your repository: a request carrying a token
 for a different repo is refused, and your CI no longer needs the repo in
 anyone's ArcSync library to be allowed to write.
 
-Without it the upload still succeeds, just unverified. That fallback exists so
-existing workflows keep working while adoption catches up, and it will be
-removed — until then it is what a request that simply omits the token relies
-on, so granting the permission is what makes the binding meaningful.
+Without it the action fails before uploading. Unverified uploads used to be
+accepted, which meant anyone signed in could name your repository and take the
+canonical diagram for it — so the fallback was removed rather than kept behind
+a warning. If your run stops with *"Could not mint a GitHub OIDC token"*, add
+the permission line above to that job.
 
 Without a usable token the backend cannot tell a public repo from a private
 one. It assumes private and keeps the diagram out of the public gallery, which

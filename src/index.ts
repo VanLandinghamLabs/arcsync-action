@@ -173,18 +173,23 @@ async function uploadToArcSync(
 
   // GitHub signs the `repository` claim in this token for the workflow that is
   // actually running, so it is the only part of the request the backend can
-  // trust to say which repo we are. Requires `permissions: id-token: write` in
-  // the workflow; getIDToken throws without it, and the backend then treats the
-  // ingest as unverified rather than failing it — so an un-migrated workflow
-  // keeps working, it just does not get the binding.
-  let oidcToken: string | undefined;
+  // trust to say which repo we are. Requires `permissions: id-token: write`;
+  // getIDToken throws without it.
+  //
+  // Hard-failing here rather than uploading unverified (#679): the backend
+  // refuses a repo-scoped ingest with no claim, so the request would 403
+  // anyway — and this is the only place that still knows the cause is a
+  // missing permission line rather than a rejected token.
+  let oidcToken: string;
   try {
     oidcToken = await core.getIDToken(ARCSYNC_OIDC_AUDIENCE);
   } catch {
-    core.info(
-      "No OIDC token available — add `permissions: id-token: write` to bind this " +
-        "upload to your repository. Continuing unverified.",
+    core.setFailed(
+      "Could not mint a GitHub OIDC token. Add `permissions: id-token: write` to " +
+        "the job running arcsync-action — ArcSync uses it to prove which repository " +
+        "this upload belongs to.",
     );
+    return null;
   }
 
   const body = JSON.stringify({
@@ -195,7 +200,7 @@ async function uploadToArcSync(
     commitSha: process.env.GITHUB_SHA,
     artifacts,
     ...(repoData ? { repoData } : {}),
-    ...(oidcToken ? { oidcToken } : {}),
+    oidcToken,
   });
 
   try {

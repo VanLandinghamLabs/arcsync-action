@@ -107,7 +107,10 @@ describe("GitHub Action — thin uploader", () => {
     mockReposGet.mockResolvedValue({ data: { description: "default-repo" } });
     // biome-ignore lint/performance/noDelete: process.env.X = undefined sets the string "undefined"
     delete process.env.GITHUB_TOKEN;
-    mockGetIDToken.mockReset().mockRejectedValue(new Error("no id-token permission"));
+    // A mintable token is the default because it is now the only path that
+    // uploads at all — a workflow without `id-token: write` fails fast (#679).
+    // Tests that exercise that refusal reject it explicitly.
+    mockGetIDToken.mockReset().mockResolvedValue("oidc.jwt.default");
     // biome-ignore lint/performance/noDelete: same reason
     delete process.env.GITHUB_REPOSITORY;
     // biome-ignore lint/performance/noDelete: same reason
@@ -303,16 +306,23 @@ describe("GitHub Action — thin uploader", () => {
     });
 
     // Un-migrated workflows have no `id-token: write`, so getIDToken throws.
-    // The upload must still succeed — unverified, not failed.
-    it("continues without an OIDC token when the permission is missing", async () => {
+    // The backend now refuses a repo-scoped ingest without the claim, so
+    // uploading anyway just trades a clear message for an opaque 403 — fail
+    // here, where we can name the exact permission line that fixes it.
+    it("fails with the permission fix when no OIDC token can be minted", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
       mockGetIDToken.mockRejectedValueOnce(new Error("Unable to get ACTIONS_ID_TOKEN_REQUEST_URL"));
-      mockHappyFetch();
+      // Only the token-broker response, not mockHappyFetch's pair: the run
+      // stops before the ingest POST, and an unconsumed `...Once` would shift
+      // every later test's fetch queue by one.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ accessToken: "minted-jwt" }),
+      });
       await runAction();
-      expect(mockSetFailed).not.toHaveBeenCalled();
-      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
-      expect(ingestBody.oidcToken).toBeUndefined();
-      expect(mockInfo).toHaveBeenCalledWith(expect.stringContaining("id-token: write"));
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("id-token: write"));
+      // Never reached the ingest POST — only the token exchange fired.
+      expect(mockFetch.mock.calls).toHaveLength(1);
     });
 
     it("omits repoData when repos.get throws (best-effort)", async () => {
