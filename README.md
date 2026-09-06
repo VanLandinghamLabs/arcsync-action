@@ -13,13 +13,10 @@ only the synthesized infrastructure description.
 
 ## Setup
 
-1. Sign in at [arcsync.dev](https://arcsync.dev) and open **Settings → GitHub Action credentials**.
-2. Enter a label (e.g. your repo name) and click **Create credential**.
-3. Copy the **Client ID** and **Client Secret** shown once, and add them to your
-   repo under **Settings → Secrets and variables → Actions** as
-   `ARCSYNC_CLIENT_ID` and `ARCSYNC_CLIENT_SECRET`.
-4. Reference them in your workflow. `id-token: write` is required — see
-   [Repository permissions](#repository-permissions):
+Install the [ArcSync GitHub App](https://arcsync.dev/settings) on the repository,
+then add the workflow. There is no secret to create, copy, or rotate — the
+workflow's own GitHub OIDC token proves which repository the run belongs to, and
+the App install is what links that repository to your ArcSync account.
 
 ```yaml
 jobs:
@@ -28,16 +25,39 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       # ...your usual build steps, so that `path` below exists —
       # e.g. `npx cdk synth` to produce cdk.out.
-      - uses: VanLandinghamLabs/arcsync-action@v2
+      - uses: VanLandinghamLabs/arcsync-action@v3
+```
+
+`id-token: write` is required — see [Repository permissions](#repository-permissions).
+
+### Without the App: client credentials
+
+For repositories where an org admin will not approve an App install, and for CI
+that is not GitHub Actions (GitLab, Jenkins, CircleCI, Buildkite — none of which
+can mint a GitHub OIDC token), authenticate with a client credential instead:
+
+1. Sign in at [arcsync.dev](https://arcsync.dev) and open **Settings → GitHub Action credentials**.
+2. Enter a label (e.g. your repo name) and click **Create credential**.
+3. Copy the **Client ID** and **Client Secret** shown once, and add them to your
+   repo under **Settings → Secrets and variables → Actions** as
+   `ARCSYNC_CLIENT_ID` and `ARCSYNC_CLIENT_SECRET`.
+4. Reference them in your workflow:
+
+```yaml
+      - uses: VanLandinghamLabs/arcsync-action@v3
         with:
           api-client-id: ${{ secrets.ARCSYNC_CLIENT_ID }}
           api-client-secret: ${{ secrets.ARCSYNC_CLIENT_SECRET }}
           path: cdk.out   # or a `terraform show -json` file
 ```
+
+Supply both or neither. Exactly one is refused with a message naming the missing
+half, rather than silently falling back to the OIDC path.
 
 ### Repository permissions
 
@@ -77,11 +97,8 @@ is not reversible after the fact — so grant the read rather than fixing it lat
 
 ```yaml
 - run: npx cdk synth
-- uses: VanLandinghamLabs/arcsync-action@v2
-  with:
-    path: cdk.out
-    api-client-id: ${{ secrets.ARCSYNC_CLIENT_ID }}
-    api-client-secret: ${{ secrets.ARCSYNC_CLIENT_SECRET }}
+- uses: VanLandinghamLabs/arcsync-action@v3
+  # `path` defaults to cdk.out
 ```
 
 ### Terraform
@@ -90,11 +107,9 @@ is not reversible after the fact — so grant the read rather than fixing it lat
 - run: |
     terraform plan -out=tfplan
     terraform show -json tfplan > plan.json
-- uses: VanLandinghamLabs/arcsync-action@v2
+- uses: VanLandinghamLabs/arcsync-action@v3
   with:
     path: plan.json
-    api-client-id: ${{ secrets.ARCSYNC_CLIENT_ID }}
-    api-client-secret: ${{ secrets.ARCSYNC_CLIENT_SECRET }}
 ```
 
 ## Inputs
@@ -103,8 +118,8 @@ is not reversible after the fact — so grant the read rather than fixing it lat
 | ------------------- | -------- | ------------------------- | ---------------------------------------------------------------- |
 | `path`              | no       | `cdk.out`                 | A `cdk synth` output directory, or a `terraform show -json` file. |
 | `api-url`           | no       | `https://api.arcsync.dev` | ArcSync API endpoint.                                            |
-| `api-client-id`     | yes      |                           | ArcSync API client ID.                                           |
-| `api-client-secret` | yes      |                           | ArcSync API client secret.                                       |
+| `api-client-id`     | no       |                           | ArcSync API client ID. Omit to authenticate with GitHub OIDC.    |
+| `api-client-secret` | no       |                           | ArcSync API client secret. Required with `api-client-id`.        |
 | `comment`           | no       | `true`                    | Post/update a PR comment with the diagram.                       |
 | `output`            | no       |                           | Optional local file to write the returned Mermaid markdown.      |
 

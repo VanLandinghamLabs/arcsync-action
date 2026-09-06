@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { COVERAGE_THRESHOLDS } from "../../coverage-gate.mjs";
 
 export default defineConfig({
   test: {
@@ -7,12 +8,7 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts"],
-      thresholds: {
-        statements: 95,
-        branches: 95,
-        functions: 95,
-        lines: 95,
-      },
+      thresholds: COVERAGE_THRESHOLDS,
     },
   },
 });

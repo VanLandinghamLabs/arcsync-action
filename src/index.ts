@@ -32,10 +32,17 @@ async function run(): Promise<void> {
 
     if (apiClientSecret) core.setSecret(apiClientSecret);
 
-    if (!apiClientId || !apiClientSecret) {
-      core.setFailed("Missing required inputs: api-client-id and api-client-secret are required.");
+    // Exactly one half is always a mistake — a typo'd secret name, or a secret
+    // that never got set — and falling through to the OIDC lane would hide it
+    // behind a confusing "no installation" error from the backend.
+    if (Boolean(apiClientId) !== Boolean(apiClientSecret)) {
+      core.setFailed(
+        `Incomplete credentials: ${apiClientId ? "api-client-secret" : "api-client-id"} is missing. ` +
+          "Supply both, or neither to authenticate with the repository's GitHub OIDC token alone.",
+      );
       return;
     }
+    const useOidcOnly = !apiClientId;
 
     const artifacts = collectArtifacts(inputPath);
     if (artifacts.length === 0) {
@@ -46,8 +53,13 @@ async function run(): Promise<void> {
     }
     core.info(`Collected ${artifacts.length} artifact(s) from ${inputPath}`);
 
-    const token = await fetchAccessToken(apiUrl, apiClientId, apiClientSecret);
-    if (!token) return; // fetchAccessToken called setFailed
+    // null means "authenticate with the OIDC token alone" — uploadToArcSync
+    // mints one either way, so the OIDC lane needs no extra round trip.
+    let token: string | null = null;
+    if (!useOidcOnly) {
+      token = await fetchAccessToken(apiUrl, apiClientId, apiClientSecret);
+      if (!token) return; // fetchAccessToken called setFailed
+    }
 
     const result = await uploadToArcSync(apiUrl, token, artifacts);
     if (!result) return; // uploadToArcSync called setFailed
@@ -133,7 +145,9 @@ const REPO_META_TIMEOUT_MS = 3000;
 
 async function uploadToArcSync(
   apiUrl: string,
-  token: string,
+  /** ArcSync access token from the client-credential broker, or null to
+   * authenticate with the workflow's own GitHub OIDC token (v3 default). */
+  token: string | null,
   artifacts: IngestArtifact[],
 ): Promise<IngestResponse | null> {
   // `Number(...) || DEFAULT` guards both a malformed env (Number("abc") → NaN,
@@ -208,7 +222,10 @@ async function uploadToArcSync(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        // Same token either way for the OIDC lane: the backend's authorizer
+        // verifies it against GitHub's JWKS and resolves the repository to the
+        // accounts that installed the App.
+        Authorization: `Bearer ${token ?? oidcToken}`,
       },
       body,
     });

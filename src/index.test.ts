@@ -122,10 +122,45 @@ describe("GitHub Action — thin uploader", () => {
   });
 
   describe("Input validation", () => {
-    it("fails when required auth inputs are missing", async () => {
-      setInputs({ path: "cdk.out" });
+    // v3's contract: both credentials, or neither. Neither is the default path
+    // and authenticates with the workflow's own OIDC token; exactly one is
+    // always a mistake and must say which half is missing.
+    it("uploads with the OIDC token alone when no credentials are given", async () => {
+      setInputs({ "api-url": "https://api.arcsync.dev", path: "cdk.out" });
+      mockReaddirSync.mockReturnValue(["Stack.template.json"]);
+      mockReadFileSync.mockReturnValue('{"Resources":{}}');
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ graphId: "g-1", graphUrl: "https://arcsync.dev/canvas/g-1" }),
+      });
+
       await runAction();
-      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("required"));
+
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      // One call, not two: the client-credential broker is skipped entirely.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe("https://api.arcsync.dev/graphs/ingest");
+      expect((init.headers as Record<string, string>).Authorization).toBe(
+        "Bearer oidc.jwt.default",
+      );
+    });
+
+    it("fails naming the missing half when only the client ID is given", async () => {
+      setInputs({ "api-url": "https://api.arcsync.dev", "api-client-id": "client-id" });
+      await runAction();
+      expect(mockSetFailed).toHaveBeenCalledWith(
+        expect.stringContaining("api-client-secret is missing"),
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("fails naming the missing half when only the secret is given", async () => {
+      setInputs({ "api-url": "https://api.arcsync.dev", "api-client-secret": "client-secret" });
+      await runAction();
+      expect(mockSetFailed).toHaveBeenCalledWith(
+        expect.stringContaining("api-client-id is missing"),
+      );
       expect(mockFetch).not.toHaveBeenCalled();
     });
 

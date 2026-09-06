@@ -19541,18 +19541,22 @@ async function run() {
 		const shouldComment = import_core.getInput("comment") !== "false";
 		const outputFile = import_core.getInput("output");
 		if (apiClientSecret) import_core.setSecret(apiClientSecret);
-		if (!apiClientId || !apiClientSecret) {
-			import_core.setFailed("Missing required inputs: api-client-id and api-client-secret are required.");
+		if (Boolean(apiClientId) !== Boolean(apiClientSecret)) {
+			import_core.setFailed(`Incomplete credentials: ${apiClientId ? "api-client-secret" : "api-client-id"} is missing. Supply both, or neither to authenticate with the repository's GitHub OIDC token alone.`);
 			return;
 		}
+		const useOidcOnly = !apiClientId;
 		const artifacts = collectArtifacts(inputPath);
 		if (artifacts.length === 0) {
 			import_core.setFailed(`No artifacts found at '${inputPath}'. Point 'path' at a cdk synth output directory (*.template.json) or a 'terraform show -json' file.`);
 			return;
 		}
 		import_core.info(`Collected ${artifacts.length} artifact(s) from ${inputPath}`);
-		const token = await fetchAccessToken(apiUrl, apiClientId, apiClientSecret);
-		if (!token) return;
+		let token = null;
+		if (!useOidcOnly) {
+			token = await fetchAccessToken(apiUrl, apiClientId, apiClientSecret);
+			if (!token) return;
+		}
 		const result = await uploadToArcSync(apiUrl, token, artifacts);
 		if (!result) return;
 		import_core.setOutput("graph-id", result.graphId);
@@ -19667,7 +19671,7 @@ async function uploadToArcSync(apiUrl, token, artifacts) {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
-				Authorization: `Bearer ${token}`
+				Authorization: `Bearer ${token ?? oidcToken}`
 			},
 			body
 		});
