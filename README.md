@@ -1,9 +1,13 @@
 # ArcSync GitHub Action
 
 Generate interactive architecture diagrams from your infrastructure-as-code build
-output. This action takes the output of a `cdk synth` or `terraform plan` step,
-uploads it to [ArcSync](https://arcsync.dev), and posts a diagram as a pull-request
-comment.
+output. This action takes the output of a `cdk synth`, `terraform plan` or
+`pulumi preview` step, uploads it to [ArcSync](https://arcsync.dev), and posts a
+diagram as a pull-request comment.
+
+For AWS CDK and Pulumi this is also the cheaper path: those are the two engines
+ArcSync otherwise synthesizes on its own servers, metered against your monthly
+server-synth quota. Building them in your own CI does not consume it.
 
 ArcSync never sees your source code and never clones your repository — it receives
 only the synthesized infrastructure description.
@@ -53,7 +57,7 @@ can mint a GitHub OIDC token), authenticate with a client credential instead:
         with:
           api-client-id: ${{ secrets.ARCSYNC_CLIENT_ID }}
           api-client-secret: ${{ secrets.ARCSYNC_CLIENT_SECRET }}
-          path: cdk.out   # or a `terraform show -json` file
+          path: cdk.out   # or a `terraform show -json` / `pulumi preview --save-plan` file
 ```
 
 Supply both or neither. Exactly one is refused with a message naming the missing
@@ -112,11 +116,37 @@ is not reversible after the fact — so grant the read rather than fixing it lat
     path: plan.json
 ```
 
+### Pulumi
+
+The preview runs against a throwaway **local** stack, so it needs no
+`PULUMI_ACCESS_TOKEN` and never touches your deployed state — ArcSync only needs
+the resource graph the preview resolves.
+
+```yaml
+- run: npm install --no-audit --no-fund # or your runtime's install step
+- uses: pulumi/setup-pulumi@v2
+- run: |
+    pulumi login --local
+    pulumi stack init arcsync-preview --non-interactive
+    pulumi config set aws:skipCredentialsValidation true
+    pulumi config set aws:skipMetadataApiCheck true
+    pulumi config set aws:skipRequestingAccountId true
+    pulumi preview --save-plan=plan.json --non-interactive
+  env:
+    PULUMI_CONFIG_PASSPHRASE: ''
+    AWS_REGION: us-east-1
+    AWS_ACCESS_KEY_ID: arcsync-stub
+    AWS_SECRET_ACCESS_KEY: arcsync-stub
+- uses: VanLandinghamLabs/arcsync-action@v3
+  with:
+    path: plan.json
+```
+
 ## Inputs
 
 | Input               | Required | Default                   | Description                                                      |
 | ------------------- | -------- | ------------------------- | ---------------------------------------------------------------- |
-| `path`              | no       | `cdk.out`                 | A `cdk synth` output directory, or a `terraform show -json` file. |
+| `path`              | no       | `cdk.out`                 | A `cdk synth` output directory, or a single plan file from `terraform show -json` or `pulumi preview --save-plan`. |
 | `api-url`           | no       | `https://api.arcsync.dev` | ArcSync API endpoint.                                            |
 | `api-client-id`     | no       |                           | ArcSync API client ID. Omit to authenticate with GitHub OIDC.    |
 | `api-client-secret` | no       |                           | ArcSync API client secret. Required with `api-client-id`.        |

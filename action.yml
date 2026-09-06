@@ -6,7 +6,7 @@ branding:
   color: "purple"
 inputs:
   path:
-    description: "Path to a cdk synth output directory, or a terraform show -json file"
+    description: "Path to a cdk synth output directory, or a single plan file from terraform show -json or pulumi preview --save-plan"
     required: false
     default: "cdk.out"
   api-url:

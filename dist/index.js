@@ -19548,7 +19548,7 @@ async function run() {
 		const useOidcOnly = !apiClientId;
 		const artifacts = collectArtifacts(inputPath);
 		if (artifacts.length === 0) {
-			import_core.setFailed(`No artifacts found at '${inputPath}'. Point 'path' at a cdk synth output directory (*.template.json) or a 'terraform show -json' file.`);
+			import_core.setFailed(`No artifacts found at '${inputPath}'. Point 'path' at a cdk synth output directory (*.template.json), a 'terraform show -json' plan file, or a 'pulumi preview --save-plan' plan file.`);
 			return;
 		}
 		import_core.info(`Collected ${artifacts.length} artifact(s) from ${inputPath}`);
@@ -19576,8 +19576,9 @@ async function run() {
 }
 /**
 * Collect IaC build artifacts to upload. A directory yields every
-* `*.template.json` it contains (cdk synth output); a single file is
-* uploaded as-is (e.g. a `terraform show -json` plan file).
+* `*.template.json` it contains (cdk synth output); a single file is uploaded
+* as-is — a `terraform show -json` plan, or a `pulumi preview --save-plan` plan.
+* The backend recognises the shape from the content, not the filename.
 */
 function collectArtifacts(inputPath) {
 	if (!existsSync(inputPath)) return [];

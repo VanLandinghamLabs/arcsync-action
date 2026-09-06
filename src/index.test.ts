@@ -178,6 +178,22 @@ describe("GitHub Action — thin uploader", () => {
       await runAction();
       expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("No artifacts found"));
     });
+
+    it("names every artifact shape it accepts, Pulumi included", async () => {
+      // The message is the only place a user with a misconfigured `path` finds
+      // out what this accepts. It listed CDK and Terraform while silently also
+      // taking a `pulumi preview --save-plan` plan (#1083), so a Pulumi user
+      // read it as "not supported".
+      setInputs({ ...AUTH_INPUTS, path: "missing" });
+      mockExistsSync.mockReturnValue(false);
+
+      await runAction();
+
+      const message = mockSetFailed.mock.calls.at(-1)?.[0] as string;
+      expect(message).toContain("cdk synth");
+      expect(message).toContain("terraform show -json");
+      expect(message).toContain("pulumi preview --save-plan");
+    });
   });
 
   describe("Happy path", () => {
