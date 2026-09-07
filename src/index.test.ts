@@ -119,6 +119,10 @@ describe("GitHub Action — thin uploader", () => {
     delete process.env.GITHUB_SHA;
     // biome-ignore lint/performance/noDelete: same reason
     delete process.env._ARCSYNC_REPO_META_TIMEOUT_MS;
+    // biome-ignore lint/performance/noDelete: same reason
+    delete process.env.GITHUB_HEAD_REF;
+    // biome-ignore lint/performance/noDelete: same reason
+    delete process.env.GITHUB_BASE_REF;
   });
 
   describe("Input validation", () => {
@@ -255,6 +259,35 @@ describe("GitHub Action — thin uploader", () => {
       expect(ingestBody.repoUrl).toBe("https://github.com/acme/infra");
       expect(ingestBody.branch).toBe("feature-x");
       expect(ingestBody.commitSha).toBe("abc1234");
+    });
+
+    it("uses GITHUB_HEAD_REF as the branch on a pull_request event and sends the pr block", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      process.env.GITHUB_REPOSITORY = "acme/infra";
+      process.env.GITHUB_REF_NAME = "7/merge";
+      process.env.GITHUB_HEAD_REF = "feature-x";
+      process.env.GITHUB_BASE_REF = "main";
+      process.env.GITHUB_SHA = "merge-sha";
+      mockGithubContext.payload = {
+        pull_request: { number: 7, base: { ref: "main", sha: "b1" }, head: { sha: "h1" } },
+      };
+      mockHappyFetch();
+      await runAction();
+      const body = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(body.branch).toBe("feature-x");
+      expect(body.commitSha).toBe("merge-sha");
+      expect(body.pr).toEqual({ number: 7, baseRef: "main", baseSha: "b1", headSha: "h1" });
+    });
+
+    it("sends no pr block and keeps GITHUB_REF_NAME on a push event", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      process.env.GITHUB_REF_NAME = "main";
+      process.env.GITHUB_HEAD_REF = "";
+      mockHappyFetch();
+      await runAction();
+      const body = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(body.branch).toBe("main");
+      expect(body).not.toHaveProperty("pr");
     });
 
     it("masks the client secret and the minted token", async () => {
@@ -631,6 +664,197 @@ describe("GitHub Action — thin uploader", () => {
       expect(body).not.toContain("```mermaid");
       // The interactive-diagram link is still present even without a mermaid block.
       expect(body).toContain("https://arcsync.dev/canvas/graph-123");
+    });
+
+    it("posts the comment using the github-token input alone, with no GITHUB_TOKEN env", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out", "github-token": "input-token" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      mockHappyFetch();
+      await runAction();
+      expect(mockCreateComment).toHaveBeenCalledTimes(1);
+      expect(mockWarning).not.toHaveBeenCalledWith(expect.stringContaining("GITHUB_TOKEN"));
+    });
+
+    const PRO_DELTA = {
+      status: "ok",
+      tier: "pro",
+      base: { graphId: "base-g", ref: "main", sha: "b1c2d3e4f5", exact: true },
+      counts: { added: 1, removed: 1, changed: 2, edgesAdded: 2, edgesRemoved: 1, resources: 4 },
+      summary: "adds 1 RDS, removes 1 NAT Gateway, changes 2 Security Groups",
+      nodes: {
+        added: [
+          {
+            id: "aws_db_instance.primary",
+            type: "aws_db_instance",
+            name: "primary",
+            resourceType: "aws_db_instance",
+          },
+        ],
+        removed: [
+          {
+            id: "aws_nat_gateway.egress",
+            type: "aws_nat_gateway",
+            name: "egress",
+            resourceType: "aws_nat_gateway",
+          },
+        ],
+        changed: [
+          {
+            id: "aws_security_group.web",
+            type: "aws_security_group",
+            name: "web",
+            resourceType: "aws_security_group",
+          },
+          {
+            id: "aws_security_group.db",
+            type: "aws_security_group",
+            name: "db",
+            resourceType: "aws_security_group",
+          },
+        ],
+      },
+      edges: { added: [], removed: [] },
+    };
+
+    function commentBody(): string {
+      return (mockCreateComment.mock.calls[0][0] as { body: string }).body;
+    }
+
+    it("renders the pro delta block above the mermaid fence", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({ delta: PRO_DELTA });
+      await runAction();
+      const body = commentBody();
+      expect(body).toContain("**Infra delta vs `main`** · compared with main @ `b1c2d3e` (exact)");
+      expect(body).toContain("adds 1 RDS, removes 1 NAT Gateway, changes 2 Security Groups");
+      expect(body).toContain("<summary>4 resources · +2 / −1 connections</summary>");
+      expect(body).toContain("| ➕ | `aws_db_instance.primary` | aws_db_instance |");
+      expect(body).toContain("| ➖ | `aws_nat_gateway.egress` | aws_nat_gateway |");
+      expect(body).toContain("| ✏️ | `aws_security_group.web` | aws_security_group |");
+      expect(body.indexOf("Infra delta")).toBeLessThan(body.indexOf("```mermaid"));
+    });
+
+    it("says 'latest parse of main' when the base is not an exact sha match", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({ delta: { ...PRO_DELTA, base: { ...PRO_DELTA.base, exact: false } } });
+      await runAction();
+      expect(commentBody()).toContain("(latest parse of main)");
+    });
+
+    it("renders one line for an empty pro delta", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({
+        delta: {
+          ...PRO_DELTA,
+          counts: {
+            added: 0,
+            removed: 0,
+            changed: 0,
+            edgesAdded: 0,
+            edgesRemoved: 0,
+            resources: 0,
+          },
+          nodes: { added: [], removed: [], changed: [] },
+        },
+      });
+      await runAction();
+      expect(commentBody()).toContain("No infrastructure changes vs `main`.");
+      expect(commentBody()).not.toContain("<details>");
+    });
+
+    it("renders one line, no table, for a connections-only pro delta", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({
+        delta: {
+          ...PRO_DELTA,
+          counts: {
+            added: 0,
+            removed: 0,
+            changed: 0,
+            edgesAdded: 2,
+            edgesRemoved: 1,
+            resources: 0,
+          },
+          nodes: { added: [], removed: [], changed: [] },
+        },
+      });
+      await runAction();
+      expect(commentBody()).toContain("Connections only vs `main`: +2 / −1.");
+      expect(commentBody()).not.toContain("<details>");
+      expect(commentBody()).not.toContain("No infrastructure changes");
+    });
+
+    it("escapes a pipe in the id and resourceType cells", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({
+        delta: {
+          ...PRO_DELTA,
+          counts: { ...PRO_DELTA.counts, added: 1, removed: 0, changed: 0, resources: 1 },
+          nodes: {
+            added: [{ id: "mod|a.b", type: "t", name: "b", resourceType: "aws_thing|weird" }],
+            removed: [],
+            changed: [],
+          },
+        },
+      });
+      await runAction();
+      // An unescaped `|` would end the cell and shift every column after it.
+      expect(commentBody()).toContain("| ➕ | `mod\\|a.b` | aws_thing\\|weird |");
+    });
+
+    it("renders the free teaser with a pricing link", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({
+        delta: { status: "ok", tier: "free", base: PRO_DELTA.base, counts: PRO_DELTA.counts },
+      });
+      await runAction();
+      const body = commentBody();
+      expect(body).toContain("**Infra delta:** this PR changes 4 resources.");
+      expect(body).toContain("[Pro feature](https://arcsync.dev/pricing)");
+      expect(body).not.toContain("aws_db_instance.primary");
+    });
+
+    it("renders the no-base hint", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({ delta: { status: "no-base", baseRef: "main" } });
+      await runAction();
+      expect(commentBody()).toContain("Infra delta needs a diagram of `main`.");
+    });
+
+    it("renders no delta block when the response has none", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch();
+      await runAction();
+      expect(commentBody()).not.toContain("Infra delta");
+    });
+
+    it("sets the delta-status output from the response, 'none' when absent", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockHappyFetch({ delta: { status: "no-base", baseRef: "main" } });
+      await runAction();
+      expect(mockSetOutput).toHaveBeenCalledWith("delta-status", "no-base");
+
+      vi.clearAllMocks();
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetOutput).toHaveBeenCalledWith("delta-status", "none");
     });
   });
 

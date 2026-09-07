@@ -48,6 +48,8 @@ outputs:
     description: "ArcSync graph ID"
   graph-url:
     description: "URL to the interactive diagram on arcsync.dev"
+  delta-status:
+    description: "Infra delta outcome for this run: ok, no-base, or none (not a pull_request run)"
 runs:
   using: "node24"
   main: "dist/index.js"

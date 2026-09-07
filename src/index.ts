@@ -15,10 +15,37 @@ interface IngestArtifact {
   content: string;
 }
 
+interface DeltaNode {
+  id: string;
+  type: string;
+  name: string;
+  resourceType: string;
+}
+
+/** Mirrors `DeltaEnvelope` in @auto-arch-diagram/core/graphDelta. Declared
+ * here because the Action is a thin uploader with no core dependency. */
+type DeltaEnvelope =
+  | { status: "no-base"; baseRef: string }
+  | {
+      status: "ok";
+      tier: "free";
+      base: { ref: string; sha: string; exact: boolean };
+      counts: { resources: number; edgesAdded: number; edgesRemoved: number };
+    }
+  | {
+      status: "ok";
+      tier: "pro";
+      base: { ref: string; sha: string; exact: boolean };
+      counts: { resources: number; edgesAdded: number; edgesRemoved: number };
+      summary: string;
+      nodes: { added: DeltaNode[]; removed: DeltaNode[]; changed: DeltaNode[] };
+    };
+
 interface IngestResponse {
   graphId: string;
   graphUrl: string;
   mermaid?: string;
+  delta?: DeltaEnvelope;
 }
 
 async function run(): Promise<void> {
@@ -66,6 +93,9 @@ async function run(): Promise<void> {
 
     core.setOutput("graph-id", result.graphId);
     core.setOutput("graph-url", result.graphUrl);
+    // Lets a workflow (and the staging smoke) assert the pr block reached
+    // the backend without parsing the comment.
+    core.setOutput("delta-status", result.delta?.status ?? "none");
     if (result.mermaid) {
       core.setOutput("mermaid", result.mermaid);
       if (outputFile) {
@@ -97,6 +127,58 @@ function collectArtifacts(inputPath: string): IngestArtifact[] {
   return readdirSync(inputPath)
     .filter((name) => name.endsWith(".template.json"))
     .map((name) => ({ filename: name, content: readFileSync(join(inputPath, name), "utf-8") }));
+}
+
+/** The `pr` block for a pull_request run. Every field comes from the event
+ * payload or GITHUB_BASE_REF; absent any of them, no block is sent and the
+ * backend computes no delta. */
+function prBlock():
+  | { number: number; baseRef: string; baseSha: string; headSha: string }
+  | undefined {
+  const pr = github.context.payload.pull_request as
+    | { number?: number; base?: { sha?: string }; head?: { sha?: string } }
+    | undefined;
+  const baseRef = process.env.GITHUB_BASE_REF;
+  if (!pr?.number || !baseRef || !pr.base?.sha || !pr.head?.sha) return undefined;
+  return { number: pr.number, baseRef, baseSha: pr.base.sha, headSha: pr.head.sha };
+}
+
+function renderDelta(delta: DeltaEnvelope): string {
+  if (delta.status === "no-base") {
+    return `*Infra delta needs a diagram of \`${delta.baseRef}\`. It appears once the ArcSync workflow has run on \`${delta.baseRef}\`.*\n\n`;
+  }
+  const n = delta.counts.resources;
+  if (delta.tier === "free") {
+    return (
+      `**Infra delta:** this PR changes ${n} resource${n === 1 ? "" : "s"}.\n` +
+      "Names and the highlighted diagram are a [Pro feature](https://arcsync.dev/pricing).\n\n"
+    );
+  }
+  const ref = delta.base.ref;
+  if (n === 0 && delta.counts.edgesAdded === 0 && delta.counts.edgesRemoved === 0) {
+    return `No infrastructure changes vs \`${ref}\`.\n\n`;
+  }
+  if (n === 0) {
+    // Edges moved but no resource did — a one-row table of nothing, so say it
+    // in a line instead.
+    return `Connections only vs \`${ref}\`: +${delta.counts.edgesAdded} / −${delta.counts.edgesRemoved}.\n\n`;
+  }
+  const how = delta.base.exact ? "exact" : `latest parse of ${ref}`;
+  const short = delta.base.sha.slice(0, 7);
+  // A `|` in a cell ends the cell and shifts every column after it.
+  const cell = (s: string) => s.replaceAll("|", "\\|");
+  const rows = [
+    ...delta.nodes.added.map((x) => `| ➕ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
+    ...delta.nodes.removed.map((x) => `| ➖ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
+    ...delta.nodes.changed.map((x) => `| ✏️ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
+  ];
+  return (
+    `**Infra delta vs \`${ref}\`** · compared with ${ref} @ \`${short}\` (${how})\n` +
+    `${delta.summary}\n\n` +
+    `<details><summary>${n} resource${n === 1 ? "" : "s"} · +${delta.counts.edgesAdded} / −${delta.counts.edgesRemoved} connections</summary>\n\n` +
+    "| | Resource | Type |\n|---|---|---|\n" +
+    `${rows.join("\n")}\n\n</details>\n\n`
+  );
 }
 
 /**
@@ -207,12 +289,17 @@ async function uploadToArcSync(
     return null;
   }
 
+  const pr = prBlock();
   const body = JSON.stringify({
     repoUrl: process.env.GITHUB_REPOSITORY
       ? `https://github.com/${process.env.GITHUB_REPOSITORY}`
       : "unknown",
-    branch: process.env.GITHUB_REF_NAME ?? "main",
+    // On a pull_request event GITHUB_REF_NAME is `<n>/merge`; the head ref
+    // is the branch a reader recognises, and it keeps every push to the PR
+    // on one canonical row. Empty on push events, so `||`.
+    branch: process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || "main",
     commitSha: process.env.GITHUB_SHA,
+    ...(pr ? { pr } : {}),
     artifacts,
     ...(repoData ? { repoData } : {}),
     oidcToken,
@@ -247,9 +334,13 @@ async function uploadToArcSync(
 
 async function postPrComment(result: IngestResponse): Promise<void> {
   try {
-    const token = process.env.GITHUB_TOKEN;
+    // The input first: `github-token` defaults to ${{ github.token }} in
+    // action.yml, and GitHub does not inject GITHUB_TOKEN into an action's
+    // environment. Reading only the env skipped every comment on the
+    // App-generated workflow.
+    const token = core.getInput("github-token") || process.env.GITHUB_TOKEN;
     if (!token) {
-      core.warning("GITHUB_TOKEN not available — skipping PR comment");
+      core.warning("No github-token input or GITHUB_TOKEN — skipping PR comment");
       return;
     }
 
@@ -260,6 +351,7 @@ async function postPrComment(result: IngestResponse): Promise<void> {
 
     const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
     let body = `${COMMENT_MARKER}\n## Architecture Diagram\n\n`;
+    if (result.delta) body += renderDelta(result.delta);
     if (result.mermaid) {
       body += `\`\`\`mermaid\n${result.mermaid}\n\`\`\`\n\n`;
     }
