@@ -1,6 +1,6 @@
 {
   "name": "arcsync-action",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -12,8 +12,8 @@
     "check": "biome check src/"
   },
   "dependencies": {
-    "@actions/core": "^1.11.0",
-    "@actions/github": "^6.0.0"
+    "@actions/core": "^3.0.1",
+    "@actions/github": "^9.1.1"
   },
   "devDependencies": {
     "vite": "^8.1.3"
