@@ -95,6 +95,17 @@ Without a usable token the backend cannot tell a public repo from a private
 one. It assumes private and keeps the diagram out of the public gallery, which
 is not reversible after the fact — so grant the read rather than fixing it later.
 
+### Pull requests from forks
+
+By default GitHub gives a `pull_request` run from a fork neither
+`id-token: write` nor your secrets, so the action cannot prove which repository
+the upload is for. It logs a notice, skips the upload, and the step succeeds.
+(A private repository that sends write tokens to fork pull requests uploads as
+usual.) The diagram updates once the
+change is merged and the workflow runs on your branch. Do not switch to
+`pull_request_target` with a checkout of the fork's head to work around this:
+that runs untrusted code with your repository's credentials.
+
 ## Usage
 
 ### AWS CDK
@@ -150,6 +161,7 @@ the resource graph the preview resolves.
 | `api-url`           | no       | `https://api.arcsync.dev` | ArcSync API endpoint.                                            |
 | `api-client-id`     | no       |                           | ArcSync API client ID. Omit to authenticate with GitHub OIDC.    |
 | `api-client-secret` | no       |                           | ArcSync API client secret. Required with `api-client-id`.        |
+| `github-token`      | no       | `${{ github.token }}`     | Reads repo metadata (visibility, description, topics) and posts the PR comment. `GITHUB_TOKEN` is not injected into an action's environment, so leave this at its default rather than setting `env: GITHUB_TOKEN`. |
 | `comment`           | no       | `true`                    | Post/update a PR comment with the diagram.                       |
 | `output`            | no       |                           | Optional local file to write the returned Mermaid markdown.      |
 
@@ -160,6 +172,7 @@ the resource graph the preview resolves.
 | `mermaid`   | Mermaid markdown returned by the API.             |
 | `graph-id`  | ArcSync graph ID.                                 |
 | `graph-url` | URL to the interactive diagram on arcsync.dev.    |
+| `delta-status` | Infra delta outcome: `ok`, `no-base` (the base branch has no diagram yet), or `none` (not a `pull_request` run). |
 
 ## Contributing
 

@@ -7,6 +7,7 @@ const mockSetFailed = vi.fn();
 const mockInfo = vi.fn();
 const mockWarning = vi.fn();
 const mockSetSecret = vi.fn();
+const mockNotice = vi.fn();
 
 vi.mock("@actions/core", () => ({
   getInput: (...args: unknown[]) => mockGetInput(...args),
@@ -16,6 +17,7 @@ vi.mock("@actions/core", () => ({
   info: (...args: unknown[]) => mockInfo(...args),
   warning: (...args: unknown[]) => mockWarning(...args),
   setSecret: (...args: unknown[]) => mockSetSecret(...args),
+  notice: (...args: unknown[]) => mockNotice(...args),
 }));
 
 const mockCreateComment = vi.fn().mockResolvedValue({ data: { id: 1 } });
@@ -24,13 +26,25 @@ const mockListComments = vi.fn().mockResolvedValue({ data: [] });
 const mockReposGet = vi.fn().mockResolvedValue({ data: { description: "default-repo" } });
 
 const mockGithubContext = {
+  eventName: "push",
   payload: {} as Record<string, unknown>,
   repo: { owner: "test-owner", repo: "test-repo" },
 };
 
+type ListComments = (params: Record<string, unknown>) => Promise<{ data: unknown[] }>;
+
 vi.mock("@actions/github", () => ({
   context: mockGithubContext,
   getOctokit: () => ({
+    // Walks pages the way Octokit does: stop on a short page.
+    paginate: async (method: ListComments, params: Record<string, unknown>) => {
+      const all: unknown[] = [];
+      for (let page = 1; ; page++) {
+        const { data } = await method({ ...params, page });
+        all.push(...data);
+        if (data.length < (params.per_page as number)) return all;
+      }
+    },
     rest: {
       issues: {
         createComment: (...args: unknown[]) => mockCreateComment(...args),
@@ -46,6 +60,7 @@ vi.mock("@actions/github", () => ({
 
 const mockReadFileSync = vi.fn().mockReturnValue('{"Resources":{}}');
 const mockWriteFileSync = vi.fn();
+const mockMkdirSync = vi.fn();
 const mockExistsSync = vi.fn().mockReturnValue(true);
 const mockReaddirSync = vi.fn().mockReturnValue(["App.template.json"]);
 const mockStatSync = vi.fn().mockReturnValue({ isDirectory: () => true });
@@ -53,6 +68,7 @@ const mockStatSync = vi.fn().mockReturnValue({ isDirectory: () => true });
 vi.mock("node:fs", () => ({
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
+  mkdirSync: (...args: unknown[]) => mockMkdirSync(...args),
   existsSync: (...args: unknown[]) => mockExistsSync(...args),
   readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
   statSync: (...args: unknown[]) => mockStatSync(...args),
@@ -100,6 +116,7 @@ describe("GitHub Action — thin uploader", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGithubContext.payload = {};
+    mockGithubContext.eventName = "push";
     mockExistsSync.mockReturnValue(true);
     mockStatSync.mockReturnValue({ isDirectory: () => true });
     mockReaddirSync.mockReturnValue(["App.template.json"]);
@@ -303,6 +320,41 @@ describe("GitHub Action — thin uploader", () => {
       mockHappyFetch();
       await runAction();
       expect(mockWriteFileSync).toHaveBeenCalledWith("diagram.md", "graph TD\n  n1[S3]");
+    });
+
+    it("creates the output file's parent directory before writing", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out", output: "docs/diagrams/arch.md" });
+      mockHappyFetch();
+      await runAction();
+      expect(mockMkdirSync).toHaveBeenCalledWith("docs/diagrams", { recursive: true });
+      expect(mockWriteFileSync).toHaveBeenCalledWith("docs/diagrams/arch.md", "graph TD\n  n1[S3]");
+    });
+
+    it("warns instead of failing when the output write throws, and still comments", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out", output: "diagram.md" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockWriteFileSync.mockImplementationOnce(() => {
+        throw new Error("EROFS: read-only file system");
+      });
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      expect(mockWarning).toHaveBeenCalledWith(
+        "Could not write diagram.md: EROFS: read-only file system",
+      );
+      expect(mockCreateComment).toHaveBeenCalled();
+    });
+
+    it("stringifies a non-Error thrown by the output write", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out", output: "diagram.md" });
+      mockMkdirSync.mockImplementationOnce(() => {
+        throw "no space";
+      });
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      expect(mockWarning).toHaveBeenCalledWith("Could not write diagram.md: no space");
     });
 
     it("omits the mermaid output and never writes a file when the ingest response has no mermaid", async () => {
@@ -577,6 +629,23 @@ describe("GitHub Action — thin uploader", () => {
       mockHappyFetch();
       await runAction();
       expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 99 }));
+      expect(mockCreateComment).not.toHaveBeenCalled();
+    });
+
+    it("finds the marker comment past the first page of comments", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      const noise = Array.from({ length: 100 }, (_, i) => ({ id: i, body: "lgtm" }));
+      mockListComments
+        .mockResolvedValueOnce({ data: noise })
+        .mockResolvedValueOnce({ data: [{ id: 555, body: "<!-- arcsync-diagram -->\nold" }] });
+      mockHappyFetch();
+      await runAction();
+      expect(mockListComments).toHaveBeenCalledWith(
+        expect.objectContaining({ per_page: 100, page: 2 }),
+      );
+      expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 555 }));
       expect(mockCreateComment).not.toHaveBeenCalled();
     });
 
@@ -855,6 +924,65 @@ describe("GitHub Action — thin uploader", () => {
       mockHappyFetch();
       await runAction();
       expect(mockSetOutput).toHaveBeenCalledWith("delta-status", "none");
+    });
+  });
+
+  describe("Fork pull requests", () => {
+    const forkPayload = {
+      pull_request: {
+        number: 9,
+        head: { sha: "h", repo: { full_name: "contributor/test-repo" } },
+        base: { sha: "b", repo: { full_name: "test-owner/test-repo" } },
+      },
+    };
+
+    it("skips the upload with a notice when GitHub withholds the OIDC token", async () => {
+      setInputs({ path: "cdk.out" });
+      mockGithubContext.eventName = "pull_request";
+      mockGithubContext.payload = forkPayload;
+      mockGetIDToken.mockRejectedValue(new Error("Unable to get ACTIONS_ID_TOKEN_REQUEST_URL"));
+      await runAction();
+      expect(mockNotice).toHaveBeenCalledWith(expect.stringContaining("Fork pull request"));
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("uploads a fork pull request when the repo sends forks an OIDC token", async () => {
+      setInputs({ path: "cdk.out" });
+      mockGithubContext.eventName = "pull_request";
+      mockGithubContext.payload = forkPayload;
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ graphId: "g", graphUrl: "https://arcsync.dev/canvas/g" }),
+      });
+      await runAction();
+      expect(mockNotice).not.toHaveBeenCalled();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the permission error for a same-repo pull request", async () => {
+      setInputs({ path: "cdk.out" });
+      mockGithubContext.eventName = "pull_request";
+      mockGithubContext.payload = {
+        pull_request: {
+          ...forkPayload.pull_request,
+          head: { sha: "h", repo: { full_name: "test-owner/test-repo" } },
+        },
+      };
+      mockGetIDToken.mockRejectedValue(new Error("no id-token permission"));
+      await runAction();
+      expect(mockNotice).not.toHaveBeenCalled();
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("id-token: write"));
+    });
+
+    it("keeps the permission error on pull_request_target, which runs with the base repo's token", async () => {
+      setInputs({ path: "cdk.out" });
+      mockGithubContext.eventName = "pull_request_target";
+      mockGithubContext.payload = forkPayload;
+      mockGetIDToken.mockRejectedValue(new Error("no id-token permission"));
+      await runAction();
+      expect(mockNotice).not.toHaveBeenCalled();
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("id-token: write"));
     });
   });
 
