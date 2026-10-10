@@ -23,6 +23,11 @@ vi.mock("@actions/core", () => ({
 const mockCreateComment = vi.fn().mockResolvedValue({ data: { id: 1 } });
 const mockUpdateComment = vi.fn().mockResolvedValue({ data: { id: 1 } });
 const mockListComments = vi.fn().mockResolvedValue({ data: [] });
+const mockDeleteComment = vi.fn().mockResolvedValue({});
+// The default GITHUB_TOKEN is an installation token, which GET /user rejects.
+const mockGetAuthenticated = vi.fn();
+const BOT = { login: "github-actions[bot]", type: "Bot" };
+const MARKER = "<!-- arcsync-diagram -->";
 const mockReposGet = vi.fn().mockResolvedValue({ data: { description: "default-repo" } });
 
 const mockGithubContext = {
@@ -50,6 +55,10 @@ vi.mock("@actions/github", () => ({
         createComment: (...args: unknown[]) => mockCreateComment(...args),
         updateComment: (...args: unknown[]) => mockUpdateComment(...args),
         listComments: (...args: unknown[]) => mockListComments(...args),
+        deleteComment: (...args: unknown[]) => mockDeleteComment(...args),
+      },
+      users: {
+        getAuthenticated: (...args: unknown[]) => mockGetAuthenticated(...args),
       },
       repos: {
         get: (...args: unknown[]) => mockReposGet(...args),
@@ -122,6 +131,7 @@ describe("GitHub Action — thin uploader", () => {
     mockReaddirSync.mockReturnValue(["App.template.json"]);
     mockReadFileSync.mockReturnValue('{"Resources":{}}');
     mockReposGet.mockResolvedValue({ data: { description: "default-repo" } });
+    mockGetAuthenticated.mockReset().mockRejectedValue(new Error("Resource not accessible"));
     // biome-ignore lint/performance/noDelete: process.env.X = undefined sets the string "undefined"
     delete process.env.GITHUB_TOKEN;
     // A mintable token is the default because it is now the only path that
@@ -624,7 +634,7 @@ describe("GitHub Action — thin uploader", () => {
       mockGithubContext.payload = { pull_request: { number: 42 } };
       process.env.GITHUB_TOKEN = "gh-token";
       mockListComments.mockResolvedValueOnce({
-        data: [{ id: 99, body: "<!-- arcsync-diagram -->\nold" }],
+        data: [{ id: 99, body: `${MARKER}\nold`, user: BOT }],
       });
       mockHappyFetch();
       await runAction();
@@ -639,7 +649,7 @@ describe("GitHub Action — thin uploader", () => {
       const noise = Array.from({ length: 100 }, (_, i) => ({ id: i, body: "lgtm" }));
       mockListComments
         .mockResolvedValueOnce({ data: noise })
-        .mockResolvedValueOnce({ data: [{ id: 555, body: "<!-- arcsync-diagram -->\nold" }] });
+        .mockResolvedValueOnce({ data: [{ id: 555, body: `${MARKER}\nold`, user: BOT }] });
       mockHappyFetch();
       await runAction();
       expect(mockListComments).toHaveBeenCalledWith(
@@ -647,6 +657,130 @@ describe("GitHub Action — thin uploader", () => {
       );
       expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 555 }));
       expect(mockCreateComment).not.toHaveBeenCalled();
+    });
+
+    function preparePrRun(): void {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch();
+    }
+
+    it("ignores a marker comment planted by another user (#1781)", async () => {
+      preparePrRun();
+      mockListComments.mockResolvedValueOnce({
+        data: [
+          { id: 7, body: MARKER, user: { login: "mallory", type: "User" } },
+          { id: 99, body: `${MARKER}\nold`, user: BOT },
+        ],
+      });
+      await runAction();
+      expect(mockUpdateComment).toHaveBeenCalledTimes(1);
+      expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 99 }));
+      expect(mockDeleteComment).not.toHaveBeenCalled();
+    });
+
+    it("posts its own comment when the only marker comment is someone else's (#1781)", async () => {
+      preparePrRun();
+      const planted = { id: 7, body: MARKER, user: { login: "mallory", type: "User" } };
+      mockListComments
+        .mockResolvedValueOnce({ data: [planted] })
+        .mockResolvedValueOnce({ data: [planted, { id: 8, body: MARKER, user: BOT }] });
+      mockCreateComment.mockResolvedValueOnce({ data: { id: 8, user: BOT } });
+      await runAction();
+      expect(mockCreateComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 42 }));
+      expect(mockUpdateComment).not.toHaveBeenCalled();
+      expect(mockDeleteComment).not.toHaveBeenCalled();
+    });
+
+    it("matches comments by the PAT's own login when GET /user answers", async () => {
+      preparePrRun();
+      mockGetAuthenticated.mockResolvedValueOnce({ data: { login: "ci-user" } });
+      mockListComments.mockResolvedValueOnce({
+        data: [
+          { id: 5, body: MARKER, user: BOT },
+          { id: 6, body: MARKER, user: { login: "ci-user", type: "User" } },
+        ],
+      });
+      await runAction();
+      expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 6 }));
+      expect(mockCreateComment).not.toHaveBeenCalled();
+    });
+
+    it("updates the oldest own comment and deletes later duplicates (#1787)", async () => {
+      preparePrRun();
+      mockListComments.mockResolvedValueOnce({
+        data: [
+          { id: 10, body: MARKER, user: BOT },
+          { id: 20, body: MARKER, user: BOT },
+        ],
+      });
+      await runAction();
+      expect(mockUpdateComment).toHaveBeenCalledTimes(1);
+      expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 10 }));
+      expect(mockDeleteComment).toHaveBeenCalledTimes(1);
+      expect(mockDeleteComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 20 }));
+    });
+
+    it("folds its new comment into one a concurrent run created first (#1787)", async () => {
+      preparePrRun();
+      mockListComments.mockResolvedValueOnce({ data: [] }).mockResolvedValueOnce({
+        data: [
+          { id: 25, body: MARKER, user: BOT },
+          { id: 30, body: MARKER, user: BOT },
+        ],
+      });
+      mockCreateComment.mockResolvedValueOnce({ data: { id: 30, user: BOT } });
+      await runAction();
+      expect(mockUpdateComment).toHaveBeenCalledWith(
+        expect.objectContaining({ comment_id: 25, body: expect.stringContaining("graph-123") }),
+      );
+      expect(mockDeleteComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 30 }));
+      expect(mockWarning).not.toHaveBeenCalled();
+    });
+
+    it("dedupes by the identity the created comment reports when GET /user is unavailable", async () => {
+      preparePrRun();
+      const app = { login: "my-app[bot]", type: "Bot" };
+      mockListComments
+        .mockResolvedValueOnce({ data: [{ id: 3, body: MARKER, user: app }] })
+        .mockResolvedValueOnce({
+          data: [
+            { id: 3, body: MARKER, user: app },
+            { id: 4, body: MARKER, user: app },
+          ],
+        });
+      mockCreateComment.mockResolvedValueOnce({ data: { id: 4, user: app } });
+      await runAction();
+      expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 3 }));
+      expect(mockDeleteComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 4 }));
+    });
+
+    it("tolerates a duplicate that a concurrent run already deleted", async () => {
+      preparePrRun();
+      mockListComments.mockResolvedValueOnce({
+        data: [
+          { id: 10, body: MARKER, user: BOT },
+          { id: 20, body: MARKER, user: BOT },
+        ],
+      });
+      mockDeleteComment.mockRejectedValueOnce(new Error("Not Found"));
+      await runAction();
+      expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 10 }));
+      expect(mockDeleteComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 20 }));
+      expect(mockWarning).not.toHaveBeenCalled();
+    });
+
+    it("deletes its new comment even when the re-list has not caught up with it", async () => {
+      preparePrRun();
+      mockListComments
+        .mockResolvedValueOnce({ data: [] })
+        .mockResolvedValueOnce({ data: [{ id: 25, body: MARKER, user: BOT }] });
+      mockCreateComment.mockResolvedValueOnce({ data: { id: 30, user: BOT } });
+      await runAction();
+      expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 25 }));
+      expect(mockDeleteComment).toHaveBeenCalledTimes(1);
+      expect(mockDeleteComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 30 }));
     });
 
     it("skips the PR comment on a non-PR event", async () => {

@@ -23,6 +23,10 @@ workflow's own GitHub OIDC token proves which repository the run belongs to, and
 the App install is what links that repository to your ArcSync account.
 
 ```yaml
+concurrency:
+  group: arcsync-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   diagram:
     runs-on: ubuntu-latest
@@ -38,6 +42,17 @@ jobs:
 ```
 
 `id-token: write` is required — see [Repository permissions](#repository-permissions).
+
+The `concurrency` group cancels a pull-request run that a newer push to the same
+PR has made stale, so the PR comment always shows the latest commit's diagram.
+Runs on `main` are never cancelled, so every merged commit keeps its diagram.
+
+The action keeps one diagram comment per PR. It only adopts a marker comment
+that the token itself wrote, and when two runs race to post, the later one folds
+its comment into the earlier one and deletes the duplicate. A GitHub App
+installation token cannot look up its own login up front, so with one the action
+posts a fresh comment on each run and then folds it into the existing one; the
+default `github-token` and personal access tokens update in place.
 
 ### Without the App: client credentials
 
