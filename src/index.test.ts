@@ -275,6 +275,58 @@ describe("GitHub Action — thin uploader", () => {
       ]);
     });
 
+    it("uploads the stacks of nested Stage assemblies, named by their path (#1784)", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      const manifest = (artifacts: Record<string, unknown>) => JSON.stringify({ artifacts });
+      const tree: Record<string, string> = {
+        "cdk.out/manifest.json": manifest({
+          Pipeline: {
+            type: "aws:cloudformation:stack",
+            properties: { templateFile: "Pipeline.template.json" },
+          },
+          Beta: { type: "cdk:cloud-assembly", properties: { directoryName: "assembly-Beta" } },
+          Prod: { type: "cdk:cloud-assembly", properties: { directoryName: "assembly-Prod" } },
+          Escape: { type: "cdk:cloud-assembly", properties: { directoryName: "../outside" } },
+          Self: { type: "cdk:cloud-assembly", properties: { directoryName: "." } },
+        }),
+        "cdk.out/Pipeline.template.json": '{"pipeline":1}',
+        "cdk.out/assembly-Beta/manifest.json": manifest({
+          Api: {
+            type: "aws:cloudformation:stack",
+            properties: { templateFile: "Api.template.json" },
+          },
+          Gone: {
+            type: "aws:cloudformation:stack",
+            properties: { templateFile: "Gone.template.json" },
+          },
+        }),
+        "cdk.out/assembly-Beta/Api.template.json": '{"beta":1}',
+        // No manifest here: the listing fallback still finds the template.
+        "cdk.out/assembly-Prod/Api.template.json": '{"prod":1}',
+      };
+      mockExistsSync.mockImplementation((p: string) => p === "cdk.out" || p in tree);
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p in tree) return tree[p];
+        throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+      });
+      mockReaddirSync.mockImplementation((dir: string) => [
+        ...new Set(
+          Object.keys(tree)
+            .filter((k) => k.startsWith(`${dir}/`))
+            .map((k) => k.slice(dir.length + 1).split("/")[0]),
+        ),
+      ]);
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.artifacts).toEqual([
+        { filename: "Pipeline.template.json", content: '{"pipeline":1}' },
+        { filename: "assembly-Beta/Api.template.json", content: '{"beta":1}' },
+        { filename: "assembly-Prod/Api.template.json", content: '{"prod":1}' },
+      ]);
+    });
+
     it("includes repoUrl, branch, and commitSha from GITHUB_* env vars", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
       process.env.GITHUB_REPOSITORY = "acme/infra";
@@ -1123,7 +1175,8 @@ describe("GitHub Action — thin uploader", () => {
   describe("Unexpected errors", () => {
     it("calls setFailed when reading an artifact throws", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
-      mockReadFileSync.mockImplementationOnce(() => {
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p.endsWith("manifest.json")) return "{}";
         throw new Error("EACCES: permission denied");
       });
       await runAction();
@@ -1134,7 +1187,8 @@ describe("GitHub Action — thin uploader", () => {
 
     it("stringifies a non-Error thrown from artifact reading via String(error)", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
-      mockReadFileSync.mockImplementationOnce(() => {
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p.endsWith("manifest.json")) return "{}";
         throw "disk offline";
       });
       await runAction();

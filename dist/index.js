@@ -20469,11 +20469,55 @@ function writeOutputFile(outputFile, mermaid) {
 		warning(`Could not write ${outputFile}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
+var MAX_ASSEMBLY_NESTING = 8;
+/** A manifest path stays inside the assembly and below it: relative, no
+* backslash, and no `..`, `.` or empty segment, so a nested assembly can never
+* point back at itself. */
+function safeRelative(value) {
+	return typeof value === "string" && !value.startsWith("/") && !value.includes("\\") && !value.split("/").some((s) => s === "" || s === "." || s === "..");
+}
+function manifestArtifacts(dir) {
+	try {
+		const artifacts = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf-8"))?.artifacts;
+		if (!artifacts || typeof artifacts !== "object") return null;
+		return Object.values(artifacts).filter((a) => a && typeof a === "object");
+	} catch {
+		return null;
+	}
+}
 /**
-* Collect IaC build artifacts to upload. A directory yields every
-* `*.template.json` it contains (cdk synth output); a single file is uploaded
-* as-is — a `terraform show -json` plan, or a `pulumi preview --save-plan` plan.
-* The backend recognises the shape from the content, not the filename.
+* Template paths under a `cdk synth` output directory, relative to it. Stacks
+* inside a `cdk.Stage` (every CDK Pipelines app) live in nested `assembly-*`
+* assemblies, reached through `manifest.json` (#1784). Same walk as core's
+* `cdkTemplatePaths`, which the published Action cannot import.
+*/
+function cdkTemplatePaths(root, rel = "", depth = 0) {
+	const dir = rel ? join(root, rel) : root;
+	const relPath = (name) => rel ? `${rel}/${name}` : name;
+	const descend = (name) => depth < MAX_ASSEMBLY_NESTING ? cdkTemplatePaths(root, relPath(name), depth + 1) : [];
+	const artifacts = manifestArtifacts(dir);
+	if (artifacts) return artifacts.flatMap(({ type, properties }) => {
+		if (type === "aws:cloudformation:stack" && safeRelative(properties?.templateFile)) return existsSync(join(dir, properties.templateFile)) ? [relPath(properties.templateFile)] : [];
+		if (type === "cdk:cloud-assembly" && safeRelative(properties?.directoryName)) return descend(properties.directoryName);
+		return [];
+	});
+	let names;
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return [];
+	}
+	return names.flatMap((name) => {
+		if (name.endsWith(".template.json")) return [relPath(name)];
+		return name.startsWith("assembly-") ? descend(name) : [];
+	});
+}
+/**
+* Collect IaC build artifacts to upload. A directory yields every stack
+* template of a cdk synth output, nested Stage assemblies included, named by
+* its path within the directory; a single file is uploaded as-is — a
+* `terraform show -json` plan, or a `pulumi preview --save-plan` plan. The
+* backend recognises the shape from the content, not the filename.
 */
 function collectArtifacts(inputPath) {
 	if (!existsSync(inputPath)) return [];
@@ -20481,7 +20525,7 @@ function collectArtifacts(inputPath) {
 		filename: basename(inputPath),
 		content: readFileSync(inputPath, "utf-8")
 	}];
-	return readdirSync(inputPath).filter((name) => name.endsWith(".template.json")).map((name) => ({
+	return [...new Set(cdkTemplatePaths(inputPath))].sort().map((name) => ({
 		filename: name,
 		content: readFileSync(join(inputPath, name), "utf-8")
 	}));
