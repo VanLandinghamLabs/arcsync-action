@@ -54,6 +54,15 @@ installation token cannot look up its own login up front, so with one the action
 posts a fresh comment on each run and then folds it into the existing one; the
 default `github-token` and personal access tokens update in place.
 
+A diagram too large for GitHub's Mermaid renderer is left out of the comment,
+which keeps the delta summary and the link to the interactive diagram. A long
+delta table is cut off with a "…and N more" row.
+
+One upload takes at most 50 stack templates and about 5.5 MB of request body.
+The action minifies each template before sending it and fails with a clear
+message past either limit. Apps larger than one upload are not supported yet
+([#2191](https://github.com/VanLandinghamLabs/arcsync/issues/2191)).
+
 ### Without the App: client credentials
 
 For repositories where an org admin will not approve an App install, and for CI

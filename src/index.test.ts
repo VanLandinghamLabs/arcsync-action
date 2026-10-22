@@ -327,6 +327,55 @@ describe("GitHub Action — thin uploader", () => {
       ]);
     });
 
+    it("uploads NestedStack templates beside the manifest's stacks (#2102)", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      const manifest = (artifacts: Record<string, unknown>) => JSON.stringify({ artifacts });
+      const tree: Record<string, string> = {
+        "cdk.out/manifest.json": manifest({
+          App: {
+            type: "aws:cloudformation:stack",
+            properties: { templateFile: "App.template.json" },
+          },
+          Beta: { type: "cdk:cloud-assembly", properties: { directoryName: "assembly-Beta" } },
+        }),
+        "cdk.out/App.template.json": '{"app":1}',
+        "cdk.out/AppData1A2B3C4D.nested.template.json": '{"data":1}',
+        "cdk.out/assembly-Beta/manifest.json": manifest({
+          Api: {
+            type: "aws:cloudformation:stack",
+            properties: { templateFile: "Api.template.json" },
+          },
+        }),
+        "cdk.out/assembly-Beta/Api.template.json": '{"beta":1}',
+        "cdk.out/assembly-Beta/ApiQueues5E6F7A8B.nested.template.json": '{"queues":1}',
+      };
+      mockExistsSync.mockImplementation((p: string) => p === "cdk.out" || p in tree);
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p in tree) return tree[p];
+        throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+      });
+      mockReaddirSync.mockImplementation((dir: string) => [
+        ...new Set(
+          Object.keys(tree)
+            .filter((k) => k.startsWith(`${dir}/`))
+            .map((k) => k.slice(dir.length + 1).split("/")[0]),
+        ),
+      ]);
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.artifacts).toEqual([
+        { filename: "App.template.json", content: '{"app":1}' },
+        { filename: "AppData1A2B3C4D.nested.template.json", content: '{"data":1}' },
+        { filename: "assembly-Beta/Api.template.json", content: '{"beta":1}' },
+        {
+          filename: "assembly-Beta/ApiQueues5E6F7A8B.nested.template.json",
+          content: '{"queues":1}',
+        },
+      ]);
+    });
+
     it("includes repoUrl, branch, and commitSha from GITHUB_* env vars", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
       process.env.GITHUB_REPOSITORY = "acme/infra";
@@ -663,6 +712,96 @@ describe("GitHub Action — thin uploader", () => {
       mockFetch.mockRejectedValueOnce("socket hang up");
       await runAction();
       expect(mockSetFailed).toHaveBeenCalledWith("ArcSync upload failed: socket hang up");
+    });
+  });
+
+  describe("Upload limits", () => {
+    it("minifies each cdk template before upload", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockReadFileSync.mockReturnValue(
+        JSON.stringify({ Resources: { Bucket: { Type: "AWS::S3::Bucket" } } }, null, 2),
+      );
+      mockHappyFetch();
+      await runAction();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.artifacts[0].content).toBe(
+        '{"Resources":{"Bucket":{"Type":"AWS::S3::Bucket"}}}',
+      );
+    });
+
+    it("uploads a template that is not valid JSON unchanged", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockReadFileSync.mockReturnValue('{ "Resources": ');
+      mockHappyFetch();
+      await runAction();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.artifacts[0].content).toBe('{ "Resources": ');
+    });
+
+    it("uploads a single plan file byte-for-byte", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "plan.json" });
+      mockStatSync.mockReturnValue({ isDirectory: () => false });
+      mockReadFileSync.mockReturnValue('{\n  "planned_values": {}\n}');
+      mockHappyFetch();
+      await runAction();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.artifacts[0].content).toBe('{\n  "planned_values": {}\n}');
+    });
+
+    it("fails before any request when there are more stacks than the backend accepts", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockReaddirSync.mockReturnValue(
+        Array.from({ length: 51 }, (_, i) => `Stack${i}.template.json`),
+      );
+      await runAction();
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("51 stack templates"));
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("at most 50"));
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("not supported yet"));
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("/issues/2191"));
+      expect(mockSetFailed).not.toHaveBeenCalledWith(expect.stringContaining("Stage"));
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("uploads exactly 50 stacks", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockReaddirSync.mockReturnValue(
+        Array.from({ length: 50 }, (_, i) => `Stack${i}.template.json`),
+      );
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      expect(JSON.parse(mockFetch.mock.calls[1][1].body).artifacts).toHaveLength(50);
+    });
+
+    it("fails with a size message instead of uploading an oversized body", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockReadFileSync.mockReturnValue(`{"a":"${"x".repeat(6_000_000)}"}`);
+      // Only the broker answers: the ingest request must never go out.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ accessToken: "minted-jwt" }),
+      });
+      await runAction();
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringMatching(/6\.\d MB.*5\.5 MB/));
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("not supported yet"));
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("/issues/2191"));
+      expect(mockSetFailed).not.toHaveBeenCalledWith(expect.stringContaining("Stage"));
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the second escape the request gets inside the Lambda event", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      // ~2.7 MB of quotes: ~4.5 MB as the request body, over 7 MB once the
+      // body is escaped again as a string in the Lambda event.
+      mockReadFileSync.mockReturnValue(`[${Array(900_000).fill('""').join(",")}]`);
+      // Only the broker answers: the ingest request must never go out.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ accessToken: "minted-jwt" }),
+      });
+      await runAction();
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("5.5 MB"));
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1110,6 +1249,77 @@ describe("GitHub Action — thin uploader", () => {
       mockHappyFetch();
       await runAction();
       expect(mockSetOutput).toHaveBeenCalledWith("delta-status", "none");
+    });
+
+    const GITHUB_COMMENT_MAX = 65_536;
+    const bigDelta = (count: number) => ({
+      ...PRO_DELTA,
+      counts: { ...PRO_DELTA.counts, added: 0, removed: 0, changed: count, resources: count },
+      nodes: {
+        added: [],
+        removed: [],
+        changed: Array.from({ length: count }, (_, i) => ({
+          id: `module.platform.aws_security_group.service_${i}_ingress_rule`,
+          type: "aws_security_group",
+          name: `service_${i}`,
+          resourceType: "aws_security_group",
+        })),
+      },
+    });
+
+    it("inlines a Mermaid diagram that fits the budget", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({ mermaid: `graph TD\n${"  n1[S3]\n".repeat(4_500)}` });
+      await runAction();
+      expect(commentBody()).toContain("```mermaid");
+    });
+
+    it("drops a Mermaid diagram too large for GitHub to render, keeping the link (#2124)", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({ delta: PRO_DELTA, mermaid: `graph TD\n${"  n1[S3]\n".repeat(8_000)}` });
+      await runAction();
+      const body = commentBody();
+      expect(body).not.toContain("```mermaid");
+      expect(body).toContain("Diagram too large to inline");
+      expect(body).toContain("[View interactive diagram](https://arcsync.dev/canvas/graph-123)");
+      expect(body).toContain("| ✏️ | `aws_security_group.web` | aws_security_group |");
+    });
+
+    it("caps the delta table and keeps the comment under GitHub's limit (#2124)", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({
+        delta: bigDelta(3_000),
+        mermaid: `graph TD\n${"  n1[S3]\n".repeat(4_500)}`,
+      });
+      await runAction();
+      const body = commentBody();
+      expect(body.length).toBeLessThanOrEqual(GITHUB_COMMENT_MAX);
+      expect(body).toContain("service_0_ingress_rule");
+      expect(body).not.toContain("service_2999_ingress_rule");
+      expect(body).toMatch(/\| \| …and \d+ more \| \|/);
+      expect(body).toContain("<summary>3000 resources");
+      // The table plus this diagram would pass the budget, so the diagram goes.
+      expect(body).not.toContain("```mermaid");
+      expect(body).toContain("[View interactive diagram](https://arcsync.dev/canvas/graph-123)");
+      expect(body).toContain("*Generated by [ArcSync](https://arcsync.dev)");
+    });
+
+    it("renders every delta row when the table fits", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({ delta: bigDelta(100) });
+      await runAction();
+      const body = commentBody();
+      expect(body).toContain("service_99_ingress_rule");
+      expect(body).not.toContain("more |");
+      expect(body).toContain("```mermaid");
     });
   });
 

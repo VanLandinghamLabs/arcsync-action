@@ -10,6 +10,19 @@ import * as github from "@actions/github";
 
 const COMMENT_MARKER = "<!-- arcsync-diagram -->";
 
+/** GitHub rejects a comment body over 65,536 characters with a 422. */
+const COMMENT_BUDGET = 60_000;
+/** Mermaid's default maxTextSize: GitHub's renderer refuses a larger diagram. */
+const MERMAID_INLINE_MAX = 50_000;
+const DELTA_ROWS_BUDGET = 20_000;
+
+/** The backend's ingest limits (packages/backend/src/lambdas/api/ingest.ts
+ * caps artifacts at 50), and the API Lambda's 6 MB invoke payload, which
+ * carries the request body re-escaped as a string inside the event. */
+const MAX_ARTIFACTS = 50;
+const MAX_EVENT_BYTES = 5_500_000;
+const LARGE_APP_ISSUE = "https://github.com/VanLandinghamLabs/arcsync/issues/2191";
+
 interface IngestArtifact {
   filename: string;
   content: string;
@@ -75,6 +88,13 @@ async function run(): Promise<void> {
     if (artifacts.length === 0) {
       core.setFailed(
         `No artifacts found at '${inputPath}'. Point 'path' at a cdk synth output directory (*.template.json), a 'terraform show -json' plan file, or a 'pulumi preview --save-plan' plan file.`,
+      );
+      return;
+    }
+    if (artifacts.length > MAX_ARTIFACTS) {
+      core.setFailed(
+        `Found ${artifacts.length} stack templates under '${inputPath}', but ArcSync accepts at most ${MAX_ARTIFACTS} per upload. ` +
+          `Apps larger than one upload are not supported yet: ${LARGE_APP_ISSUE}`,
       );
       return;
     }
@@ -153,6 +173,14 @@ function safeRelative(value: unknown): value is string {
   );
 }
 
+function listDir(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
 function manifestArtifacts(dir: string): ManifestArtifact[] | null {
   try {
     const parsed = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf-8")) as {
@@ -179,9 +207,10 @@ function cdkTemplatePaths(root: string, rel = "", depth = 0): string[] {
   const relPath = (name: string) => (rel ? `${rel}/${name}` : name);
   const descend = (name: string) =>
     depth < MAX_ASSEMBLY_NESTING ? cdkTemplatePaths(root, relPath(name), depth + 1) : [];
+  const names = listDir(dir);
   const artifacts = manifestArtifacts(dir);
   if (artifacts) {
-    return artifacts.flatMap(({ type, properties }) => {
+    const listed = artifacts.flatMap(({ type, properties }) => {
       if (type === "aws:cloudformation:stack" && safeRelative(properties?.templateFile)) {
         return existsSync(join(dir, properties.templateFile))
           ? [relPath(properties.templateFile)]
@@ -192,12 +221,10 @@ function cdkTemplatePaths(root: string, rel = "", depth = 0): string[] {
       }
       return [];
     });
-  }
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return [];
+    // A NestedStack's template is a file asset of its parent, not a manifest
+    // artifact, and it sits beside the parent's template (#2102).
+    const nested = names.filter((name) => name.endsWith(".nested.template.json")).map(relPath);
+    return [...listed, ...nested];
   }
   return names.flatMap((name) => {
     if (name.endsWith(".template.json")) return [relPath(name)];
@@ -217,9 +244,20 @@ function collectArtifacts(inputPath: string): IngestArtifact[] {
   if (!statSync(inputPath).isDirectory()) {
     return [{ filename: basename(inputPath), content: readFileSync(inputPath, "utf-8") }];
   }
-  return [...new Set(cdkTemplatePaths(inputPath))]
-    .sort()
-    .map((name) => ({ filename: name, content: readFileSync(join(inputPath, name), "utf-8") }));
+  return [...new Set(cdkTemplatePaths(inputPath))].sort().map((name) => ({
+    filename: name,
+    content: minifyJson(readFileSync(join(inputPath, name), "utf-8")),
+  }));
+}
+
+/** The backend's hashCdkSynth digests the parsed template, so minifying
+ * leaves dedup unchanged while cutting the upload by a third or more. */
+function minifyJson(content: string): string {
+  try {
+    return JSON.stringify(JSON.parse(content));
+  } catch {
+    return content;
+  }
 }
 
 /** The `pr` block for a pull_request run. Every field comes from the event
@@ -260,11 +298,19 @@ function renderDelta(delta: DeltaEnvelope): string {
   const short = delta.base.sha.slice(0, 7);
   // A `|` in a cell ends the cell and shifts every column after it.
   const cell = (s: string) => s.replaceAll("|", "\\|");
-  const rows = [
+  const allRows = [
     ...delta.nodes.added.map((x) => `| ➕ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
     ...delta.nodes.removed.map((x) => `| ➖ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
     ...delta.nodes.changed.map((x) => `| ✏️ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
   ];
+  const rows: string[] = [];
+  let used = 0;
+  for (const row of allRows) {
+    used += row.length + 1;
+    if (used > DELTA_ROWS_BUDGET) break;
+    rows.push(row);
+  }
+  if (rows.length < allRows.length) rows.push(`| | …and ${allRows.length - rows.length} more | |`);
   return (
     `**Infra delta vs \`${ref}\`** · compared with ${ref} @ \`${short}\` (${how})\n` +
     `${delta.summary}\n\n` +
@@ -404,6 +450,16 @@ async function uploadToArcSync(
     oidcToken,
   });
 
+  const eventBytes = Buffer.byteLength(JSON.stringify(body));
+  if (eventBytes > MAX_EVENT_BYTES) {
+    const mb = (n: number) => (n / 1_000_000).toFixed(1);
+    core.setFailed(
+      `Upload is ${mb(eventBytes)} MB as the API receives it, over ArcSync's ${mb(MAX_EVENT_BYTES)} MB request limit. ` +
+        `Apps larger than one upload are not supported yet: ${LARGE_APP_ISSUE}`,
+    );
+    return null;
+  }
+
   try {
     const response = await fetch(`${apiUrl}/graphs/ingest`, {
       method: "POST",
@@ -462,13 +518,19 @@ async function postPrComment(result: IngestResponse): Promise<void> {
     if (!prNumber) return;
 
     const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
-    let body = `${COMMENT_MARKER}\n## Architecture Diagram\n\n`;
-    if (result.delta) body += renderDelta(result.delta);
-    if (result.mermaid) {
-      body += `\`\`\`mermaid\n${result.mermaid}\n\`\`\`\n\n`;
+    const head = `${COMMENT_MARKER}\n## Architecture Diagram\n\n${result.delta ? renderDelta(result.delta) : ""}`;
+    const tail =
+      `[View interactive diagram](${result.graphUrl})\n\n` +
+      `---\n*Generated by [ArcSync](https://arcsync.dev) | Updated ${timestamp}*`;
+    let diagram = result.mermaid ? `\`\`\`mermaid\n${result.mermaid}\n\`\`\`\n\n` : "";
+    if (
+      result.mermaid &&
+      (result.mermaid.length > MERMAID_INLINE_MAX ||
+        head.length + diagram.length + tail.length > COMMENT_BUDGET)
+    ) {
+      diagram = "*Diagram too large to inline here. View it on ArcSync.*\n\n";
     }
-    body += `[View interactive diagram](${result.graphUrl})\n\n`;
-    body += `---\n*Generated by [ArcSync](https://arcsync.dev) | Updated ${timestamp}*`;
+    const body = head + diagram + tail;
 
     // Anyone can plant the hidden marker in a comment, so only comments the
     // token itself wrote count as ours (#1781).
