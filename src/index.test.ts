@@ -756,9 +756,12 @@ describe("GitHub Action — thin uploader", () => {
       await runAction();
       expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("51 stack templates"));
       expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("at most 50"));
-      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("not supported yet"));
-      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("/issues/2191"));
-      expect(mockSetFailed).not.toHaveBeenCalledWith(expect.stringContaining("Stage"));
+      expect(mockSetFailed).toHaveBeenCalledWith(
+        expect.stringContaining("once per CDK Pipelines Stage"),
+      );
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("graph-key"));
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("cdk.out/assembly-"));
+      expect(mockSetFailed).not.toHaveBeenCalledWith(expect.stringContaining("not supported yet"));
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
@@ -783,9 +786,11 @@ describe("GitHub Action — thin uploader", () => {
       });
       await runAction();
       expect(mockSetFailed).toHaveBeenCalledWith(expect.stringMatching(/6\.\d MB.*5\.5 MB/));
-      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("not supported yet"));
-      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("/issues/2191"));
-      expect(mockSetFailed).not.toHaveBeenCalledWith(expect.stringContaining("Stage"));
+      expect(mockSetFailed).toHaveBeenCalledWith(
+        expect.stringContaining("once per CDK Pipelines Stage"),
+      );
+      expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("graph-key"));
+      expect(mockSetFailed).not.toHaveBeenCalledWith(expect.stringContaining("not supported yet"));
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
@@ -802,6 +807,172 @@ describe("GitHub Action — thin uploader", () => {
       await runAction();
       expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("5.5 MB"));
       expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("graph-key (#2191)", () => {
+    it("sends the graph key with the upload", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out/assembly-Prod", "graph-key": "prod" });
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      expect(JSON.parse(mockFetch.mock.calls[1][1].body).graphKey).toBe("prod");
+    });
+
+    it("sends no graph key at all when the input is unset", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockHappyFetch();
+      await runAction();
+      expect(JSON.parse(mockFetch.mock.calls[1][1].body)).not.toHaveProperty("graphKey");
+    });
+
+    it.each(["Prod", "-prod", "a".repeat(41), "prod stage", "prod-->"])(
+      "fails before any request on graph-key %j",
+      async (graphKey) => {
+        setInputs({ ...AUTH_INPUTS, path: "cdk.out", "graph-key": graphKey });
+        await runAction();
+        expect(mockSetFailed).toHaveBeenCalledWith(expect.stringContaining("graph-key"));
+        expect(mockFetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it("accepts a 40-character graph key", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out", "graph-key": "a".repeat(40) });
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("PR comments per graph key (#2191)", () => {
+    const PROD = "<!-- arcsync-diagram:prod -->";
+    const BETA = "<!-- arcsync-diagram:beta -->";
+
+    function prepareKeyedRun(graphKey?: string): void {
+      setInputs({
+        ...AUTH_INPUTS,
+        path: "cdk.out",
+        ...(graphKey ? { "graph-key": graphKey } : {}),
+      });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch();
+    }
+
+    it("marks and titles its comment with the graph key", async () => {
+      prepareKeyedRun("prod");
+      await runAction();
+      const body = mockCreateComment.mock.calls[0][0].body as string;
+      expect(
+        body.startsWith(`${PROD}
+## Architecture Diagram: prod
+`),
+      ).toBe(true);
+      expect(body).not.toContain(MARKER);
+    });
+
+    it("keeps the unkeyed marker and heading byte-for-byte when graph-key is unset", async () => {
+      prepareKeyedRun();
+      await runAction();
+      const body = mockCreateComment.mock.calls[0][0].body as string;
+      expect(
+        body.startsWith(`${MARKER}
+## Architecture Diagram
+
+`),
+      ).toBe(true);
+    });
+
+    it("updates only its own Stage's comment and leaves the others alone", async () => {
+      prepareKeyedRun("prod");
+      mockListComments.mockResolvedValueOnce({
+        data: [
+          {
+            id: 1,
+            body: `${MARKER}
+whole app`,
+            user: BOT,
+          },
+          {
+            id: 2,
+            body: `${BETA}
+beta`,
+            user: BOT,
+          },
+          {
+            id: 3,
+            body: `${PROD}
+old prod`,
+            user: BOT,
+          },
+          {
+            id: 4,
+            body: `${PROD}
+duplicate prod`,
+            user: BOT,
+          },
+        ],
+      });
+      await runAction();
+      expect(mockUpdateComment).toHaveBeenCalledTimes(1);
+      expect(mockUpdateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 3 }));
+      expect(mockDeleteComment).toHaveBeenCalledTimes(1);
+      expect(mockDeleteComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 4 }));
+      expect(mockCreateComment).not.toHaveBeenCalled();
+    });
+
+    it("posts a new comment beside another Stage's instead of overwriting it", async () => {
+      prepareKeyedRun("prod");
+      mockListComments
+        .mockResolvedValueOnce({ data: [{ id: 2, body: BETA, user: BOT }] })
+        .mockResolvedValueOnce({
+          data: [
+            { id: 2, body: BETA, user: BOT },
+            { id: 5, body: PROD, user: BOT },
+          ],
+        });
+      mockCreateComment.mockResolvedValueOnce({ data: { id: 5, user: BOT } });
+      await runAction();
+      expect(mockCreateComment).toHaveBeenCalledTimes(1);
+      expect(mockUpdateComment).not.toHaveBeenCalled();
+      expect(mockDeleteComment).not.toHaveBeenCalled();
+    });
+
+    it("an unkeyed run neither updates nor deletes a Stage's comment", async () => {
+      prepareKeyedRun();
+      mockListComments
+        .mockResolvedValueOnce({ data: [{ id: 3, body: PROD, user: BOT }] })
+        .mockResolvedValueOnce({
+          data: [
+            { id: 3, body: PROD, user: BOT },
+            { id: 6, body: MARKER, user: BOT },
+          ],
+        });
+      mockCreateComment.mockResolvedValueOnce({ data: { id: 6, user: BOT } });
+      await runAction();
+      expect(mockCreateComment).toHaveBeenCalledTimes(1);
+      expect(mockUpdateComment).not.toHaveBeenCalled();
+      expect(mockDeleteComment).not.toHaveBeenCalled();
+    });
+
+    it("ignores a comment that only quotes its marker in the body", async () => {
+      prepareKeyedRun("prod");
+      mockListComments.mockResolvedValueOnce({
+        data: [{ id: 8, body: `${BETA}\nsee ${PROD} for prod`, user: BOT }],
+      });
+      await runAction();
+      expect(mockUpdateComment).not.toHaveBeenCalled();
+      expect(mockCreateComment).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not mistake a longer key's comment for its own", async () => {
+      prepareKeyedRun("prod");
+      mockListComments.mockResolvedValueOnce({
+        data: [{ id: 7, body: "<!-- arcsync-diagram:prod-eu -->", user: BOT }],
+      });
+      await runAction();
+      expect(mockUpdateComment).not.toHaveBeenCalled();
+      expect(mockCreateComment).toHaveBeenCalledTimes(1);
     });
   });
 

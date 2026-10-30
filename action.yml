@@ -41,6 +41,14 @@ inputs:
   output:
     description: "Optional local file path to write the returned Mermaid markdown"
     required: false
+  graph-key:
+    description: >-
+      Names one slice of an app too big for one upload (50 stack templates or
+      about 5.5 MB), such as a CDK Pipelines Stage. Run the action once per
+      slice with its own key and a path at that slice's assembly; each key
+      keeps its own diagram, PR infra delta and PR comment. 1-40 lowercase
+      letters, digits, '-' or '_', starting with a letter or digit.
+    required: false
 outputs:
   mermaid:
     description: "Mermaid markdown returned by the API"

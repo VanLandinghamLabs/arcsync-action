@@ -47,7 +47,8 @@ The `concurrency` group cancels a pull-request run that a newer push to the same
 PR has made stale, so the PR comment always shows the latest commit's diagram.
 Runs on `main` are never cancelled, so every merged commit keeps its diagram.
 
-The action keeps one diagram comment per PR. It only adopts a marker comment
+The action keeps one diagram comment per PR (one per `graph-key`, when you set
+it). It only adopts a marker comment
 that the token itself wrote, and when two runs race to post, the later one folds
 its comment into the earlier one and deletes the duplicate. A GitHub App
 installation token cannot look up its own login up front, so with one the action
@@ -60,8 +61,7 @@ delta table is cut off with a "…and N more" row.
 
 One upload takes at most 50 stack templates and about 5.5 MB of request body.
 The action minifies each template before sending it and fails with a clear
-message past either limit. Apps larger than one upload are not supported yet
-([#2191](https://github.com/VanLandinghamLabs/arcsync/issues/2191)).
+message past either limit. For a larger app, see [Large apps](#large-apps).
 
 ### Without the App: client credentials
 
@@ -177,6 +177,39 @@ the resource graph the preview resolves.
     path: plan.json
 ```
 
+### Large apps
+
+An app over one upload's limits (50 stack templates or about 5.5 MB) can be
+diagrammed in slices. Run the action once per CDK Pipelines Stage, pointing
+`path` at that Stage's nested assembly and giving each step its own
+`graph-key`:
+
+```yaml
+- run: npx cdk synth
+- uses: VanLandinghamLabs/arcsync-action@v3
+  with:
+    path: cdk.out/assembly-Beta
+    graph-key: beta
+- uses: VanLandinghamLabs/arcsync-action@v3
+  with:
+    path: cdk.out/assembly-Prod
+    graph-key: prod
+```
+
+Each graph key is its own diagram on ArcSync. It has its own canvas, library
+entry, PR infra delta (compared with the same key on the base branch) and PR
+comment, so the slices never overwrite each other. A graph key is 1 to 40
+characters: lowercase letters, digits, `-` or `_`, starting with a letter or
+digit. Keep a slice's key the same from run to run, since a new key starts a
+new diagram.
+
+Each slice counts as one stored diagram, and each run spends one parse. A
+diagram with a graph key is refreshed by the action alone: ArcSync offers no
+re-parse for it, on push or by hand, because a server-side re-parse would build
+the whole app, not the slice. Slices of a public repo stay out of the public
+gallery. If you add `graph-key` to a workflow with an open PR, the PR's earlier
+comment from the unkeyed run stays until you delete it.
+
 ## Inputs
 
 | Input               | Required | Default                   | Description                                                      |
@@ -188,6 +221,7 @@ the resource graph the preview resolves.
 | `github-token`      | no       | `${{ github.token }}`     | Reads repo metadata (visibility, description, topics) and posts the PR comment. `GITHUB_TOKEN` is not injected into an action's environment, so leave this at its default rather than setting `env: GITHUB_TOKEN`. |
 | `comment`           | no       | `true`                    | Post/update a PR comment with the diagram.                       |
 | `output`            | no       |                           | Optional local file to write the returned Mermaid markdown.      |
+| `graph-key`         | no       |                           | Names one slice of an app too big for one upload, such as a CDK Pipelines Stage. Each key keeps its own diagram, delta and PR comment. See [Large apps](#large-apps). |
 
 ## Outputs
 

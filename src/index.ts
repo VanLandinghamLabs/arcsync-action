@@ -8,7 +8,14 @@ const ARCSYNC_OIDC_AUDIENCE = "https://api.arcsync.dev";
 
 import * as github from "@actions/github";
 
-const COMMENT_MARKER = "<!-- arcsync-diagram -->";
+/** One PR comment per graph key (#2191), so per-Stage runs neither overwrite
+ * nor fold away each other's. Unset keeps the marker every earlier release
+ * wrote. A key is a validated slug, so it cannot close the HTML comment. */
+const commentMarker = (graphKey: string) =>
+  graphKey ? `<!-- arcsync-diagram:${graphKey} -->` : "<!-- arcsync-diagram -->";
+
+/** Mirrors the backend's graphKey rule in packages/backend/src/lib/repoKey.ts. */
+const GRAPH_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 /** GitHub rejects a comment body over 65,536 characters with a 422. */
 const COMMENT_BUDGET = 60_000;
@@ -21,7 +28,10 @@ const DELTA_ROWS_BUDGET = 20_000;
  * carries the request body re-escaped as a string inside the event. */
 const MAX_ARTIFACTS = 50;
 const MAX_EVENT_BYTES = 5_500_000;
-const LARGE_APP_ISSUE = "https://github.com/VanLandinghamLabs/arcsync/issues/2191";
+const SPLIT_BY_STAGE =
+  "Run the Action once per CDK Pipelines Stage (or other slice of the app), each step with its own " +
+  "`graph-key` and a `path` at that Stage's assembly, such as cdk.out/assembly-Prod. " +
+  "See https://github.com/VanLandinghamLabs/arcsync-action#large-apps";
 
 interface IngestArtifact {
   filename: string;
@@ -69,6 +79,7 @@ async function run(): Promise<void> {
     const apiClientSecret = core.getInput("api-client-secret");
     const shouldComment = core.getInput("comment") !== "false";
     const outputFile = core.getInput("output");
+    const graphKey = core.getInput("graph-key");
 
     if (apiClientSecret) core.setSecret(apiClientSecret);
 
@@ -84,6 +95,13 @@ async function run(): Promise<void> {
     }
     const useOidcOnly = !apiClientId;
 
+    if (graphKey && !GRAPH_KEY_RE.test(graphKey)) {
+      core.setFailed(
+        `Invalid graph-key '${graphKey}': use 1-40 lowercase letters, digits, '-' or '_', starting with a letter or digit.`,
+      );
+      return;
+    }
+
     const artifacts = collectArtifacts(inputPath);
     if (artifacts.length === 0) {
       core.setFailed(
@@ -94,7 +112,7 @@ async function run(): Promise<void> {
     if (artifacts.length > MAX_ARTIFACTS) {
       core.setFailed(
         `Found ${artifacts.length} stack templates under '${inputPath}', but ArcSync accepts at most ${MAX_ARTIFACTS} per upload. ` +
-          `Apps larger than one upload are not supported yet: ${LARGE_APP_ISSUE}`,
+          SPLIT_BY_STAGE,
       );
       return;
     }
@@ -108,7 +126,7 @@ async function run(): Promise<void> {
       if (!token) return; // fetchAccessToken called setFailed
     }
 
-    const result = await uploadToArcSync(apiUrl, token, artifacts);
+    const result = await uploadToArcSync(apiUrl, token, artifacts, graphKey);
     if (!result) return; // uploadToArcSync called setFailed
 
     core.setOutput("graph-id", result.graphId);
@@ -123,7 +141,7 @@ async function run(): Promise<void> {
     core.info(`Diagram ready: ${result.graphUrl}`);
 
     if (shouldComment && github.context.payload.pull_request) {
-      await postPrComment(result);
+      await postPrComment(result, graphKey);
     }
   } catch (error) {
     core.setFailed(error instanceof Error ? error.message : String(error));
@@ -371,6 +389,7 @@ async function uploadToArcSync(
    * authenticate with the workflow's own GitHub OIDC token (v3 default). */
   token: string | null,
   artifacts: IngestArtifact[],
+  graphKey: string,
 ): Promise<IngestResponse | null> {
   // `Number(...) || DEFAULT` guards both a malformed env (Number("abc") → NaN,
   // and setTimeout(NaN) fires immediately) and an accidental 0 — either falls
@@ -445,6 +464,7 @@ async function uploadToArcSync(
     branch: process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || "main",
     commitSha: process.env.GITHUB_SHA,
     ...(pr ? { pr } : {}),
+    ...(graphKey ? { graphKey } : {}),
     artifacts,
     ...(repoData ? { repoData } : {}),
     oidcToken,
@@ -455,7 +475,7 @@ async function uploadToArcSync(
     const mb = (n: number) => (n / 1_000_000).toFixed(1);
     core.setFailed(
       `Upload is ${mb(eventBytes)} MB as the API receives it, over ArcSync's ${mb(MAX_EVENT_BYTES)} MB request limit. ` +
-        `Apps larger than one upload are not supported yet: ${LARGE_APP_ISSUE}`,
+        SPLIT_BY_STAGE,
     );
     return null;
   }
@@ -500,7 +520,7 @@ async function tokenLogin(octokit: ReturnType<typeof github.getOctokit>): Promis
   }
 }
 
-async function postPrComment(result: IngestResponse): Promise<void> {
+async function postPrComment(result: IngestResponse, graphKey: string): Promise<void> {
   try {
     // The input first: `github-token` defaults to ${{ github.token }} in
     // action.yml, and GitHub does not inject GITHUB_TOKEN into an action's
@@ -518,7 +538,9 @@ async function postPrComment(result: IngestResponse): Promise<void> {
     if (!prNumber) return;
 
     const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
-    const head = `${COMMENT_MARKER}\n## Architecture Diagram\n\n${result.delta ? renderDelta(result.delta) : ""}`;
+    const marker = commentMarker(graphKey);
+    const title = graphKey ? `Architecture Diagram: ${graphKey}` : "Architecture Diagram";
+    const head = `${marker}\n## ${title}\n\n${result.delta ? renderDelta(result.delta) : ""}`;
     const tail =
       `[View interactive diagram](${result.graphUrl})\n\n` +
       `---\n*Generated by [ArcSync](https://arcsync.dev) | Updated ${timestamp}*`;
@@ -542,7 +564,7 @@ async function postPrComment(result: IngestResponse): Promise<void> {
         per_page: 100,
       });
       return comments
-        .filter((c) => c.user?.login === login && c.body?.includes(COMMENT_MARKER))
+        .filter((c) => c.user?.login === login && c.body?.startsWith(marker))
         .sort((a, b) => a.id - b.id);
     };
     const deleteDuplicates = async (duplicates: readonly { id: number }[]) => {
