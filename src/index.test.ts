@@ -376,6 +376,63 @@ describe("GitHub Action — thin uploader", () => {
       ]);
     });
 
+    it("stops following assembly-* directories eight levels down", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p.endsWith("manifest.json")) throw new Error(`ENOENT: ${p}`);
+        return '{"Resources":{}}';
+      });
+      mockReaddirSync.mockReturnValue(["Stack.template.json", "assembly-loop"]);
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      const filenames = ingestBody.artifacts.map((a: { filename: string }) => a.filename);
+      expect(filenames).toEqual([
+        "Stack.template.json",
+        "assembly-loop/Stack.template.json",
+        "assembly-loop/assembly-loop/Stack.template.json",
+        "assembly-loop/assembly-loop/assembly-loop/Stack.template.json",
+        "assembly-loop/assembly-loop/assembly-loop/assembly-loop/Stack.template.json",
+        "assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/Stack.template.json",
+        "assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/Stack.template.json",
+        "assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/Stack.template.json",
+        "assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/assembly-loop/Stack.template.json",
+      ]);
+    });
+
+    it("skips a manifest's nested assembly whose directory is missing", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      const tree: Record<string, string> = {
+        "cdk.out/manifest.json": JSON.stringify({
+          artifacts: {
+            App: {
+              type: "aws:cloudformation:stack",
+              properties: { templateFile: "App.template.json" },
+            },
+            Gone: { type: "cdk:cloud-assembly", properties: { directoryName: "assembly-Gone" } },
+          },
+        }),
+        "cdk.out/App.template.json": '{"app":1}',
+      };
+      mockExistsSync.mockImplementation((p: string) => p === "cdk.out" || p in tree);
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p in tree) return tree[p];
+        throw new Error(`ENOENT: ${p}`);
+      });
+      mockReaddirSync.mockImplementation((dir: string) => {
+        if (dir !== "cdk.out") throw new Error(`ENOENT: scandir '${dir}'`);
+        return ["manifest.json", "App.template.json"];
+      });
+      mockHappyFetch();
+      await runAction();
+      expect(mockSetFailed).not.toHaveBeenCalled();
+      const ingestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(ingestBody.artifacts).toEqual([
+        { filename: "App.template.json", content: '{"app":1}' },
+      ]);
+    });
+
     it("includes repoUrl, branch, and commitSha from GITHUB_* env vars", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
       process.env.GITHUB_REPOSITORY = "acme/infra";
@@ -1389,6 +1446,22 @@ duplicate prod`,
       expect(body).toContain("**Infra delta:** this PR changes 4 resources.");
       expect(body).toContain("[Pro feature](https://arcsync.dev/pricing)");
       expect(body).not.toContain("aws_db_instance.primary");
+    });
+
+    it("says 'resource', singular, in the free teaser for one change", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({
+        delta: {
+          status: "ok",
+          tier: "free",
+          base: PRO_DELTA.base,
+          counts: { resources: 1, edgesAdded: 0, edgesRemoved: 0 },
+        },
+      });
+      await runAction();
+      expect(commentBody()).toContain("**Infra delta:** this PR changes 1 resource.\n");
     });
 
     it("renders the no-base hint", async () => {
