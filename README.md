@@ -7,10 +7,14 @@ diagram as a pull-request comment.
 
 For AWS CDK and Pulumi this is also the cheaper path: those are the two engines
 ArcSync otherwise synthesizes on its own servers, metered against your monthly
-server-synth quota. Building them in your own CI does not consume it.
+server-synth quota. Building them in your own CI does not consume it, as long
+as **Re-parse on push** is off for that diagram. With it on, a push to a paid
+workspace also runs a server synth.
 
-ArcSync never sees your source code and never clones your repository — it receives
-only the synthesized infrastructure description.
+The action never reads your source code and uploads only the synthesized
+infrastructure description. The ArcSync GitHub App is separate: on a paid
+workspace it clones the repository to re-parse on push. Turn off **Re-parse on
+push** in the diagram's settings to stop that, or set a `graph-key`.
 
 > This repository is a one-way mirror of the ArcSync monorepo. See **Contributing**
 > below.
@@ -65,9 +69,11 @@ message past either limit. For a larger app, see [Large apps](#large-apps).
 
 ### Without the App: client credentials
 
-For repositories where an org admin will not approve an App install, and for CI
-that is not GitHub Actions (GitLab, Jenkins, CircleCI, Buildkite — none of which
-can mint a GitHub OIDC token), authenticate with a client credential instead:
+For repositories where an org admin will not approve an App install, authenticate
+with a client credential instead. The job still needs `id-token: write`: the
+credential names your account, and the OIDC token proves the repository. This
+action runs only on GitHub Actions, and ArcSync refuses a GitHub repository upload
+without a GitHub OIDC token, so other CI systems cannot upload one.
 
 1. Sign in at [arcsync.dev](https://arcsync.dev) and open **Settings → GitHub Action credentials**.
 2. Enter a label (e.g. your repo name) and click **Create credential**.
@@ -115,9 +121,10 @@ canonical diagram for it — so the fallback was removed rather than kept behind
 a warning. If your run stops with *"Could not mint a GitHub OIDC token"*, add
 the permission line above to that job.
 
-Without a usable token the backend cannot tell a public repo from a private
-one. It assumes private and keeps the diagram out of the public gallery, which
-is not reversible after the fact — so grant the read rather than fixing it later.
+Without a usable token the backend falls back to an anonymous GitHub lookup. If
+that fails or times out, it assumes private and keeps the diagram out of the
+public gallery, which is not reversible after the fact. Grant the read rather
+than fixing it later.
 
 ### Pull requests from forks
 
@@ -144,6 +151,7 @@ that runs untrusted code with your repository's credentials.
 
 ```yaml
 - run: |
+    terraform init
     terraform plan -out=tfplan
     terraform show -json tfplan > plan.json
 - uses: VanLandinghamLabs/arcsync-action@v3
@@ -203,7 +211,9 @@ characters: lowercase letters, digits, `-` or `_`, starting with a letter or
 digit. Keep a slice's key the same from run to run, since a new key starts a
 new diagram.
 
-Each slice counts as one stored diagram, and each run spends one parse. A
+Each slice counts as one stored diagram. With the App, each run spends one parse
+per ArcSync account linked to the repository. With a client credential, it spends
+one parse. A
 diagram with a graph key is refreshed by the action alone: ArcSync offers no
 re-parse for it, on push or by hand, because a server-side re-parse would build
 the whole app, not the slice. Slices of a public repo stay out of the public
@@ -216,7 +226,7 @@ comment from the unkeyed run stays until you delete it.
 | ------------------- | -------- | ------------------------- | ---------------------------------------------------------------- |
 | `path`              | no       | `cdk.out`                 | A `cdk synth` output directory, or a single plan file from `terraform show -json` or `pulumi preview --save-plan`. |
 | `api-url`           | no       | `https://api.arcsync.dev` | ArcSync API endpoint.                                            |
-| `api-client-id`     | no       |                           | ArcSync API client ID. Omit to authenticate with GitHub OIDC.    |
+| `api-client-id`     | no       |                           | ArcSync API client ID. Omit to authenticate with GitHub OIDC alone. |
 | `api-client-secret` | no       |                           | ArcSync API client secret. Required with `api-client-id`.        |
 | `github-token`      | no       | `${{ github.token }}`     | Reads repo metadata (visibility, description, topics) and posts the PR comment. `GITHUB_TOKEN` is not injected into an action's environment, so leave this at its default rather than setting `env: GITHUB_TOKEN`. |
 | `comment`           | no       | `true`                    | Post/update a PR comment with the diagram.                       |
@@ -230,7 +240,7 @@ comment from the unkeyed run stays until you delete it.
 | `mermaid`   | Mermaid markdown returned by the API.             |
 | `graph-id`  | ArcSync graph ID.                                 |
 | `graph-url` | URL to the interactive diagram on arcsync.dev.    |
-| `delta-status` | Infra delta outcome: `ok`, `no-base` (the base branch has no diagram yet), or `none` (not a `pull_request` run). |
+| `delta-status` | Infra delta outcome: `ok`, `no-base` (the base branch has no diagram yet), or `none` (no delta came back: not a `pull_request` run, or the delta could not be computed). |
 
 ## Contributing
 
