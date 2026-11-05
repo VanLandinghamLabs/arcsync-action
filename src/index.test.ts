@@ -1352,9 +1352,9 @@ duplicate prod`,
       expect(body).toContain("**Infra delta vs `main`** · compared with main @ `b1c2d3e` (exact)");
       expect(body).toContain("adds 1 RDS, removes 1 NAT Gateway, changes 2 Security Groups");
       expect(body).toContain("<summary>4 resources · +2 / −1 connections</summary>");
-      expect(body).toContain("| ➕ | `aws_db_instance.primary` | aws_db_instance |");
-      expect(body).toContain("| ➖ | `aws_nat_gateway.egress` | aws_nat_gateway |");
-      expect(body).toContain("| ✏️ | `aws_security_group.web` | aws_security_group |");
+      expect(body).toContain("| ➕ | `aws_db_instance.primary` | `aws_db_instance` |");
+      expect(body).toContain("| ➖ | `aws_nat_gateway.egress` | `aws_nat_gateway` |");
+      expect(body).toContain("| ✏️ | `aws_security_group.web` | `aws_security_group` |");
       expect(body.indexOf("Infra delta")).toBeLessThan(body.indexOf("```mermaid"));
     });
 
@@ -1431,7 +1431,52 @@ duplicate prod`,
       });
       await runAction();
       // An unescaped `|` would end the cell and shift every column after it.
-      expect(commentBody()).toContain("| ➕ | `mod\\|a.b` | aws_thing\\|weird |");
+      expect(commentBody()).toContain("| ➕ | `mod\\|a.b` | `aws_thing\\|weird` |");
+    });
+
+    const HOSTILE_TYPE = "x\n\n</details>\n\n[Review required](https://evil.example) @acme/sec #1";
+
+    function mockOneAddedNode(node: { id: string; resourceType: string }, summary?: string) {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({
+        delta: {
+          ...PRO_DELTA,
+          ...(summary ? { summary } : {}),
+          counts: { ...PRO_DELTA.counts, added: 1, removed: 0, changed: 0, resources: 1 },
+          nodes: { added: [{ type: "unknown", name: "n", ...node }], removed: [], changed: [] },
+        },
+      });
+    }
+
+    it("keeps a hostile resource type inside its table cell", async () => {
+      mockOneAddedNode({ id: "Bad", resourceType: HOSTILE_TYPE });
+      await runAction();
+      expect(commentBody()).toContain(
+        "| ➕ | `Bad` | `x </details> [Review required](https://evil.example) @acme/sec #1` |",
+      );
+    });
+
+    it("renders a hostile summary as inert text", async () => {
+      mockOneAddedNode({ id: "Bad", resourceType: "x" }, `adds 1 ${HOSTILE_TYPE}`);
+      await runAction();
+      const body = commentBody();
+      expect(body).not.toContain("evil.example");
+      expect(body).toContain("adds 1 x &#60;&#47;details&#62; &#91;Review required&#93;");
+      // A bare character reference for `@` still renders a live mention.
+      expect(body).toContain("&#64;&#8203;acme&#47;sec &#35;&#8203;1\n");
+    });
+
+    it.each([
+      ["a`b", "`` a`b ``"],
+      ["``a```", "```` ``a``` ````"],
+      ['for_each["a\nb"]', '`for_each["a b"]`'],
+      ["\u202ename", "`name`"],
+    ])("keeps the id %j inside one code span", async (id, expected) => {
+      mockOneAddedNode({ id, resourceType: "t" });
+      await runAction();
+      expect(commentBody()).toContain(`| ➕ | ${expected} | \`t\` |`);
     });
 
     it("renders the free teaser with a pricing link", async () => {
@@ -1530,7 +1575,7 @@ duplicate prod`,
       expect(body).not.toContain("```mermaid");
       expect(body).toContain("Diagram too large to inline");
       expect(body).toContain("[View interactive diagram](https://arcsync.dev/canvas/graph-123)");
-      expect(body).toContain("| ✏️ | `aws_security_group.web` | aws_security_group |");
+      expect(body).toContain("| ✏️ | `aws_security_group.web` | `aws_security_group` |");
     });
 
     it("caps the delta table and keeps the comment under GitHub's limit (#2124)", async () => {

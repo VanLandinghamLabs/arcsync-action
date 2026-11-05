@@ -292,6 +292,31 @@ function prBlock():
   return { number: pr.number, baseRef, baseSha: pr.base.sha, headSha: pr.head.sha };
 }
 
+const oneLine = (s: string) => s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ").trim();
+
+/**
+ * Resource ids and types come straight from the PR's IaC. Inside a code span
+ * Markdown, HTML and mentions are inert, which leaves two ways out: a `|` ends
+ * the table cell, and a backtick run as long as the fence ends the span.
+ */
+function codeCell(s: string): string {
+  const text = oneLine(s).replaceAll("|", "\\|");
+  const longest = (text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+  const fence = "`".repeat(longest + 1);
+  return longest ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
+}
+
+/**
+ * The same text as prose: the summary falls back to a raw resource type. A
+ * character reference carries no Markdown structure, but GitHub links mentions
+ * and issue refs after rendering, so those also get a zero-width space.
+ */
+const inertText = (s: string) =>
+  oneLine(s).replace(/[^\p{L}\p{N} ,]/gu, (c) => {
+    const ref = `&#${c.codePointAt(0)};`;
+    return c === "@" || c === "#" ? `${ref}&#8203;` : ref;
+  });
+
 function renderDelta(delta: DeltaEnvelope): string {
   if (delta.status === "no-base") {
     return `*Infra delta needs a diagram of \`${delta.baseRef}\`. It appears once the ArcSync workflow has run on \`${delta.baseRef}\`.*\n\n`;
@@ -314,24 +339,24 @@ function renderDelta(delta: DeltaEnvelope): string {
   }
   const how = delta.base.exact ? "exact" : `latest parse of ${ref}`;
   const short = delta.base.sha.slice(0, 7);
-  // A `|` in a cell ends the cell and shifts every column after it.
-  const cell = (s: string) => s.replaceAll("|", "\\|");
+  const row = (mark: string, x: DeltaNode) =>
+    `| ${mark} | ${codeCell(x.id)} | ${codeCell(x.resourceType)} |`;
   const allRows = [
-    ...delta.nodes.added.map((x) => `| ➕ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
-    ...delta.nodes.removed.map((x) => `| ➖ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
-    ...delta.nodes.changed.map((x) => `| ✏️ | \`${cell(x.id)}\` | ${cell(x.resourceType)} |`),
+    ...delta.nodes.added.map((x) => row("➕", x)),
+    ...delta.nodes.removed.map((x) => row("➖", x)),
+    ...delta.nodes.changed.map((x) => row("✏️", x)),
   ];
   const rows: string[] = [];
   let used = 0;
-  for (const row of allRows) {
-    used += row.length + 1;
+  for (const line of allRows) {
+    used += line.length + 1;
     if (used > DELTA_ROWS_BUDGET) break;
-    rows.push(row);
+    rows.push(line);
   }
   if (rows.length < allRows.length) rows.push(`| | …and ${allRows.length - rows.length} more | |`);
   return (
     `**Infra delta vs \`${ref}\`** · compared with ${ref} @ \`${short}\` (${how})\n` +
-    `${delta.summary}\n\n` +
+    `${inertText(delta.summary)}\n\n` +
     `<details><summary>${n} resource${n === 1 ? "" : "s"} · +${delta.counts.edgesAdded} / −${delta.counts.edgesRemoved} connections</summary>\n\n` +
     "| | Resource | Type |\n|---|---|---|\n" +
     `${rows.join("\n")}\n\n</details>\n\n`
