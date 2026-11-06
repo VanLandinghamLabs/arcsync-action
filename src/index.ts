@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import * as core from "@actions/core";
 
 /** Must stay identical to the backend's ARCSYNC_OIDC_AUDIENCE — a token minted
@@ -420,6 +421,24 @@ async function fetchAccessToken(
 /** Mirrors the backend fetchRepoMetadata 2.5 s cap; overridable via env for tests. */
 const REPO_META_TIMEOUT_MS = 3000;
 
+/** The first delay honours the `Retry-After: 10` on the backend's 503. */
+const INGEST_RETRY_DELAYS_MS = [10_000, 20_000];
+
+/** API Gateway's own body, which no ArcSync handler returns on purpose. */
+const GATEWAY_500_BODY = '{"message":"Internal Server Error"}';
+
+/**
+ * A 503 is the backend saying to retry. On the OIDC-only lane the authorizer
+ * has no way to answer 503: it throws when GitHub's keys are unreachable, and
+ * API Gateway reports that as this 500. A crashed handler gives the same 500,
+ * so on this lane a crash is retried too and can spend a parse unit per attempt.
+ * That is accepted: otherwise a key outage fails every OIDC-only run. With an
+ * ArcSync credential the authorizer does not throw this way, so the 500 can only
+ * be a crash and is not retried.
+ */
+const isTransientIngestFailure = (status: number, detail: string, token: string | null) =>
+  status === 503 || (status === 500 && token === null && detail.trim() === GATEWAY_500_BODY);
+
 async function uploadToArcSync(
   apiUrl: string,
   /** ArcSync access token from the client-credential broker, or null to
@@ -518,24 +537,30 @@ async function uploadToArcSync(
   }
 
   try {
-    const response = await fetch(`${apiUrl}/graphs/ingest`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // Same token either way for the OIDC lane: the backend's authorizer
-        // verifies it against GitHub's JWKS and resolves the repository to the
-        // accounts that installed the App.
-        Authorization: `Bearer ${token ?? oidcToken}`,
-      },
-      body,
-    });
+    for (let attempt = 0; ; attempt++) {
+      const response = await fetch(`${apiUrl}/graphs/ingest`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Same token either way for the OIDC lane: the backend's authorizer
+          // verifies it against GitHub's JWKS and resolves the repository to the
+          // accounts that installed the App.
+          Authorization: `Bearer ${token ?? oidcToken}`,
+        },
+        body,
+      });
 
-    if (!response.ok) {
+      if (response.ok) return (await response.json()) as IngestResponse;
+
       const detail = await response.text().catch(() => "");
-      core.setFailed(`ArcSync API returned HTTP ${response.status}: ${detail.slice(0, 200)}`);
-      return null;
+      const delay = INGEST_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !isTransientIngestFailure(response.status, detail, token)) {
+        core.setFailed(`ArcSync API returned HTTP ${response.status}: ${detail.slice(0, 200)}`);
+        return null;
+      }
+      core.info(`ArcSync API returned HTTP ${response.status}, retrying in ${delay / 1000}s.`);
+      await sleep(delay);
     }
-    return (await response.json()) as IngestResponse;
   } catch (error) {
     core.setFailed(
       `ArcSync upload failed: ${error instanceof Error ? error.message : String(error)}`,

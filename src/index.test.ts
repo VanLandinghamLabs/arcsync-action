@@ -20,6 +20,11 @@ vi.mock("@actions/core", () => ({
   notice: (...args: unknown[]) => mockNotice(...args),
 }));
 
+const mockSleep = vi.fn().mockResolvedValue(undefined);
+vi.mock("node:timers/promises", () => ({
+  setTimeout: (...args: unknown[]) => mockSleep(...args),
+}));
+
 const mockCreateComment = vi.fn().mockResolvedValue({ data: { id: 1 } });
 const mockUpdateComment = vi.fn().mockResolvedValue({ data: { id: 1 } });
 const mockListComments = vi.fn().mockResolvedValue({ data: [] });
@@ -752,12 +757,87 @@ describe("GitHub Action — thin uploader", () => {
       });
       mockFetch.mockResolvedValueOnce({
         ok: false,
-        status: 503,
+        status: 400,
         text: () => Promise.reject(new Error("body already used")),
       });
       await runAction();
-      // The `.catch(() => "")` falls back to an empty detail; HTTP 503 still surfaces.
-      expect(mockSetFailed).toHaveBeenCalledWith("ArcSync API returned HTTP 503: ");
+      // The `.catch(() => "")` falls back to an empty detail; HTTP 400 still surfaces.
+      expect(mockSetFailed).toHaveBeenCalledWith("ArcSync API returned HTTP 400: ");
+    });
+
+    describe("transient ingest failures (#2822)", () => {
+      const failure = (status: number, detail: string) => ({
+        ok: false,
+        status,
+        text: () => Promise.resolve(detail),
+      });
+      const GATEWAY_500 = '{"message":"Internal Server Error"}';
+      const success = {
+        ok: true,
+        json: () => Promise.resolve({ graphId: "g", graphUrl: "u", mermaid: "m" }),
+      };
+      const withCredential = () => {
+        setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ accessToken: "minted-jwt" }),
+        });
+      };
+      const oidcOnly = () => setInputs({ "api-url": "https://api.arcsync.dev", path: "cdk.out" });
+      const ingestCalls = () =>
+        mockFetch.mock.calls.filter(([url]) => String(url).endsWith("/graphs/ingest"));
+
+      it("retries a 503 and succeeds", async () => {
+        withCredential();
+        mockFetch.mockResolvedValueOnce(failure(503, "{}"));
+        mockFetch.mockResolvedValueOnce(success);
+        await runAction();
+        expect(ingestCalls()).toHaveLength(2);
+        expect(ingestCalls()[1][1].body).toBe(ingestCalls()[0][1].body);
+        expect(mockSleep.mock.calls).toEqual([[10_000]]);
+        expect(mockSetFailed).not.toHaveBeenCalled();
+      });
+
+      it("gives up after two retries and reports the last answer", async () => {
+        withCredential();
+        for (let i = 0; i < 3; i++) mockFetch.mockResolvedValueOnce(failure(503, "still down"));
+        await runAction();
+        expect(ingestCalls()).toHaveLength(3);
+        expect(mockSleep.mock.calls).toEqual([[10_000], [20_000]]);
+        expect(mockSetFailed).toHaveBeenCalledWith("ArcSync API returned HTTP 503: still down");
+      });
+
+      it("retries the gateway's 500 on the OIDC-only lane, where the authorizer threw", async () => {
+        oidcOnly();
+        mockFetch.mockResolvedValueOnce(failure(500, GATEWAY_500));
+        mockFetch.mockResolvedValueOnce(success);
+        await runAction();
+        expect(ingestCalls()).toHaveLength(2);
+        expect(mockSetFailed).not.toHaveBeenCalled();
+      });
+
+      it("does not retry that 500 with a credential, where it means a crash", async () => {
+        withCredential();
+        mockFetch.mockResolvedValueOnce(failure(500, GATEWAY_500));
+        await runAction();
+        expect(ingestCalls()).toHaveLength(1);
+        expect(mockSleep).not.toHaveBeenCalled();
+      });
+
+      it("does not retry a handler's own 500 on the OIDC-only lane", async () => {
+        oidcOnly();
+        mockFetch.mockResolvedValueOnce(failure(500, '{"error":"Internal error"}'));
+        await runAction();
+        expect(ingestCalls()).toHaveLength(1);
+      });
+
+      it("does not retry a 403", async () => {
+        withCredential();
+        mockFetch.mockResolvedValueOnce(failure(403, "refused"));
+        await runAction();
+        expect(ingestCalls()).toHaveLength(1);
+        expect(mockSetFailed).toHaveBeenCalledWith("ArcSync API returned HTTP 403: refused");
+      });
     });
 
     it("reports a non-Error thrown value from the ingest request via String(error)", async () => {

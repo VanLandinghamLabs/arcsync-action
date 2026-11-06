@@ -1,6 +1,6 @@
 {
   "name": "arcsync-action",
-  "version": "3.3.3",
+  "version": "3.3.5",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
