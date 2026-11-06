@@ -1509,6 +1509,62 @@ duplicate prod`,
       expect(commentBody()).toContain("**Infra delta:** this PR changes 1 resource.\n");
     });
 
+    const proCounts = (counts: Partial<typeof PRO_DELTA.counts> = {}) => ({
+      delta: {
+        status: "ok",
+        tier: "pro-counts",
+        base: PRO_DELTA.base,
+        counts: { ...PRO_DELTA.counts, ...counts },
+      },
+    });
+
+    it("keeps the comment on a pro-counts delta, with counts and a retry note", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch(proCounts());
+      await runAction();
+      expect(mockWarning).not.toHaveBeenCalledWith(expect.stringContaining("PR comment failed"));
+      const body = commentBody();
+      expect(body).toContain(
+        "**Infra delta vs `main`:** 4 resources · +2 / −1 connections\n" +
+          "Resource details could not be loaded. Re-run this workflow to retry.\n\n",
+      );
+      expect(body).not.toContain("arcsync.dev/pricing");
+      expect(body.indexOf("Infra delta")).toBeLessThan(body.indexOf("```mermaid"));
+    });
+
+    it("says 'resource', singular, in the pro-counts block for one change", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch(proCounts({ resources: 1 }));
+      await runAction();
+      expect(commentBody()).toContain("**Infra delta vs `main`:** 1 resource · +2 / −1");
+    });
+
+    it("needs no retry note for a pro-counts delta with nothing to list", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch(proCounts({ resources: 0, edgesAdded: 0, edgesRemoved: 0 }));
+      await runAction();
+      const body = commentBody();
+      expect(body).toContain("No infrastructure changes vs `main`.");
+      expect(body).not.toContain("Re-run this workflow");
+    });
+
+    it("needs no retry note for a connections-only pro-counts delta", async () => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch(proCounts({ resources: 0 }));
+      await runAction();
+      const body = commentBody();
+      expect(body).toContain("Connections only vs `main`: +2 / −1.");
+      expect(body).not.toContain("Re-run this workflow");
+    });
+
     it("renders the no-base hint", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
       mockGithubContext.payload = { pull_request: { number: 42 } };

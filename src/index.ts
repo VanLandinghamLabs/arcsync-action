@@ -57,6 +57,12 @@ type DeltaEnvelope =
     }
   | {
       status: "ok";
+      tier: "pro-counts";
+      base: { ref: string; sha: string; exact: boolean };
+      counts: { resources: number; edgesAdded: number; edgesRemoved: number };
+    }
+  | {
+      status: "ok";
       tier: "pro";
       base: { ref: string; sha: string; exact: boolean };
       counts: { resources: number; edgesAdded: number; edgesRemoved: number };
@@ -336,6 +342,12 @@ function renderDelta(delta: DeltaEnvelope): string {
     // Edges moved but no resource did — a one-row table of nothing, so say it
     // in a line instead.
     return `Connections only vs \`${ref}\`: +${delta.counts.edgesAdded} / −${delta.counts.edgesRemoved}.\n\n`;
+  }
+  if (delta.tier === "pro-counts") {
+    return (
+      `**Infra delta vs \`${ref}\`:** ${n} resource${n === 1 ? "" : "s"} · +${delta.counts.edgesAdded} / −${delta.counts.edgesRemoved} connections\n` +
+      "Resource details could not be loaded. Re-run this workflow to retry.\n\n"
+    );
   }
   const how = delta.base.exact ? "exact" : `latest parse of ${ref}`;
   const short = delta.base.sha.slice(0, 7);

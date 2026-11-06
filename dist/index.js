@@ -20827,6 +20827,9 @@ function renderDelta(delta) {
 	const ref = delta.base.ref;
 	if (n === 0 && delta.counts.edgesAdded === 0 && delta.counts.edgesRemoved === 0) return `No infrastructure changes vs \`${ref}\`.\n\n`;
 	if (n === 0) return `Connections only vs \`${ref}\`: +${delta.counts.edgesAdded} / −${delta.counts.edgesRemoved}.\n\n`;
+	if (delta.tier === "pro-counts") return `**Infra delta vs \`${ref}\`:** ${n} resource${n === 1 ? "" : "s"} · +${delta.counts.edgesAdded} / −${delta.counts.edgesRemoved} connections\nResource details could not be loaded. Re-run this workflow to retry.
+
+`;
 	const how = delta.base.exact ? "exact" : `latest parse of ${ref}`;
 	const short = delta.base.sha.slice(0, 7);
 	const row = (mark, x) => `| ${mark} | ${codeCell(x.id)} | ${codeCell(x.resourceType)} |`;
