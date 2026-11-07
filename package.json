@@ -1,6 +1,6 @@
 {
   "name": "arcsync-action",
-  "version": "3.3.5",
+  "version": "3.3.6",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -9,7 +9,8 @@
     "test:coverage": "vitest run --coverage",
     "lint": "biome lint src/",
     "format": "biome format --write src/",
-    "check": "biome check src/"
+    "check": "biome check src/",
+    "check-types": "tsc --noEmit"
   },
   "dependencies": {
     "@actions/core": "^3.0.1",
