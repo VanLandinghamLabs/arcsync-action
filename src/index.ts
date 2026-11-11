@@ -23,6 +23,7 @@ const COMMENT_BUDGET = 60_000;
 /** Mermaid's default maxTextSize: GitHub's renderer refuses a larger diagram. */
 const MERMAID_INLINE_MAX = 50_000;
 const DELTA_ROWS_BUDGET = 20_000;
+const SUMMARY_BUDGET = 10_000;
 
 /** The backend's ingest limits (packages/backend/src/lambdas/api/ingest.ts
  * caps artifacts at 50), and the API Lambda's 6 MB invoke payload, which
@@ -318,11 +319,23 @@ function codeCell(s: string): string {
  * character reference carries no Markdown structure, but GitHub links mentions
  * and issue refs after rendering, so those also get a zero-width space.
  */
-const inertText = (s: string) =>
-  oneLine(s).replace(/[^\p{L}\p{N} ,]/gu, (c) => {
-    const ref = `&#${c.codePointAt(0)};`;
-    return c === "@" || c === "#" ? `${ref}&#8203;` : ref;
-  });
+const inertChar = (c: string) => {
+  if (/[\p{L}\p{N} ,]/u.test(c)) return c;
+  const ref = `&#${c.codePointAt(0)};`;
+  return c === "@" || c === "#" ? `${ref}&#8203;` : ref;
+};
+
+/** Escaping can grow the text about twelvefold, so the budget counts escaped
+ * characters, and the cut falls between whole character references. */
+function inertSummary(s: string): string {
+  let out = "";
+  for (const c of oneLine(s)) {
+    const piece = inertChar(c);
+    if (out.length + piece.length > SUMMARY_BUDGET) return `${out}… *(Summary truncated.)*`;
+    out += piece;
+  }
+  return out;
+}
 
 function renderDelta(delta: DeltaEnvelope): string {
   if (delta.status === "no-base") {
@@ -369,7 +382,7 @@ function renderDelta(delta: DeltaEnvelope): string {
   if (rows.length < allRows.length) rows.push(`| | …and ${allRows.length - rows.length} more | |`);
   return (
     `**Infra delta vs \`${ref}\`** · compared with ${ref} @ \`${short}\` (${how})\n` +
-    `${inertText(delta.summary)}\n\n` +
+    `${inertSummary(delta.summary)}\n\n` +
     `<details><summary>${n} resource${n === 1 ? "" : "s"} · +${delta.counts.edgesAdded} / −${delta.counts.edgesRemoved} connections</summary>\n\n` +
     "| | Resource | Type |\n|---|---|---|\n" +
     `${rows.join("\n")}\n\n</details>\n\n`
