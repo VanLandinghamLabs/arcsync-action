@@ -47,6 +47,14 @@ interface DeltaNode {
   resourceType: string;
 }
 
+interface DeltaCounts {
+  resources: number;
+  edgesAdded: number;
+  edgesRemoved: number;
+  /** Resources changed only in deploy-artifact pointers; not in `resources`. */
+  codeOnly?: number;
+}
+
 /** Mirrors `DeltaEnvelope` in @auto-arch-diagram/core/graphDelta. Declared
  * here because the Action is a thin uploader with no core dependency. */
 type DeltaEnvelope =
@@ -55,19 +63,19 @@ type DeltaEnvelope =
       status: "ok";
       tier: "free";
       base: { ref: string; sha: string; exact: boolean };
-      counts: { resources: number; edgesAdded: number; edgesRemoved: number };
+      counts: DeltaCounts;
     }
   | {
       status: "ok";
       tier: "pro-counts";
       base: { ref: string; sha: string; exact: boolean };
-      counts: { resources: number; edgesAdded: number; edgesRemoved: number };
+      counts: DeltaCounts;
     }
   | {
       status: "ok";
       tier: "pro";
       base: { ref: string; sha: string; exact: boolean };
-      counts: { resources: number; edgesAdded: number; edgesRemoved: number };
+      counts: DeltaCounts;
       summary: string;
       nodes: { added: DeltaNode[]; removed: DeltaNode[]; changed: DeltaNode[] };
     };
@@ -350,7 +358,9 @@ function renderDelta(delta: DeltaEnvelope): string {
   }
   const ref = delta.base.ref;
   if (n === 0 && delta.counts.edgesAdded === 0 && delta.counts.edgesRemoved === 0) {
-    return `No infrastructure changes vs \`${ref}\`.\n\n`;
+    const code = delta.counts.codeOnly ?? 0;
+    const note = code > 0 ? `; ${code} resource${code === 1 ? "" : "s"} changed code only` : "";
+    return `No infrastructure changes vs \`${ref}\`${note}.\n\n`;
   }
   if (n === 0) {
     // Edges moved but no resource did — a one-row table of nothing, so say it

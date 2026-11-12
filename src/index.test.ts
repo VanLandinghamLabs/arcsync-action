@@ -1470,6 +1470,33 @@ duplicate prod`,
       expect(commentBody()).not.toContain("<details>");
     });
 
+    it.each([
+      [1, "No infrastructure changes vs `main`; 1 resource changed code only."],
+      [3, "No infrastructure changes vs `main`; 3 resources changed code only."],
+    ])("names %i code-only resources on an otherwise empty pro delta", async (codeOnly, line) => {
+      setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
+      mockGithubContext.payload = { pull_request: { number: 42 } };
+      process.env.GITHUB_TOKEN = "gh-token";
+      mockHappyFetch({
+        delta: {
+          ...PRO_DELTA,
+          counts: {
+            added: 0,
+            removed: 0,
+            changed: 0,
+            edgesAdded: 0,
+            edgesRemoved: 0,
+            resources: 0,
+            codeOnly,
+          },
+          nodes: { added: [], removed: [], changed: [] },
+        },
+      });
+      await runAction();
+      expect(commentBody()).toContain(line);
+      expect(commentBody()).not.toContain("<details>");
+    });
+
     it("renders one line, no table, for a connections-only pro delta", async () => {
       setInputs({ ...AUTH_INPUTS, path: "cdk.out" });
       mockGithubContext.payload = { pull_request: { number: 42 } };
